@@ -1,7 +1,7 @@
 # Save as: director_engine/llm_analyst.py
-import ollama
+import ollama # type: ignore
 import json
-import httpx
+import httpx # type: ignore
 # --- THIS IS THE FIX ---
 from config import (
     OLLAMA_MODEL, 

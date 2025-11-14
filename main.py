@@ -1,17 +1,17 @@
 # Save as: director_engine/main.py
-import uvicorn
+import uvicorn # type: ignore
 import asyncio
 import threading
 import webbrowser
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, PlainTextResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, BackgroundTasks # type: ignore
+from fastapi.staticfiles import StaticFiles # type: ignore
+from fastapi.responses import FileResponse, PlainTextResponse # type: ignore
+from pydantic import BaseModel, Field # type: ignore
 from typing import Dict, Any, List, Optional
-import socketio
+import socketio # type: ignore
 
 import config
 import llm_analyst
