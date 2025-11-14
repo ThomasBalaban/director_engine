@@ -96,21 +96,30 @@ def _emit_threadsafe(event, data):
     This is the core of the fix.
     """
     global ui_event_loop
-    if ui_event_loop:
-        try:
-            # Schedule the coroutine to be executed on the UI server's event loop
-            asyncio.run_coroutine_threadsafe(
-                sio.emit(event, data),
-                ui_event_loop
-            )
-        except Exception as e:
-            # This can happen if the loop is shutting down
-            if "event loop is closed" not in str(e):
-                # print(f"UI Emit Error: Could not send event '{event}'. Reason: {e}")
-                pass # Silently ignore
-    else:
-        # This warning *should* no longer appear
-        print(f"UI Emit Warning: Event loop not ready. Dropped event '{event}'.")
+    
+    # More defensive check
+    if ui_event_loop is None:
+        # Loop not ready yet - this can happen during startup
+        return
+    
+    if ui_event_loop.is_closed():
+        # Loop is shutting down
+        return
+    
+    try:
+        # Schedule the coroutine to be executed on the UI server's event loop
+        asyncio.run_coroutine_threadsafe(
+            sio.emit(event, data),
+            ui_event_loop
+        )
+    except RuntimeError as e:
+        # Handle "Event loop is closed" gracefully during shutdown
+        if "closed" not in str(e).lower():
+            print(f"⚠️ UI Emit Error: Could not send event '{event}'. Reason: {e}")
+    except Exception as e:
+        # Other unexpected errors
+        print(f"❌ UI Emit Error: Could not send event '{event}'. Reason: {e}")
+        
 
 def emit_vision_context(context): _emit_threadsafe('vision_context', {'context': context})
 def emit_spoken_word_context(context): _emit_threadsafe('spoken_word_context', {'context': context})
@@ -183,8 +192,6 @@ def open_browser():
     except Exception as e: print(f"Could not open browser: {e}")
 
 
-# --- THIS IS THE FIX ---
-# We revert to the robust `run_server` model
 def run_server():
     """Run the Uvicorn server in a blocking manner."""
     global ui_event_loop, summary_ticker_task
@@ -193,49 +200,62 @@ def run_server():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # 2. Assign the loop to the global var *before* the server starts
+    # 2. Assign the loop to the global var *before* anything else
     ui_event_loop = loop
-    print(f"UI event loop {ui_event_loop} captured manually.")
+    print(f"✅ UI event loop captured: {id(ui_event_loop)}")
     
     # 3. Manually run the startup tasks that *were* in lifespan
     loop.run_until_complete(llm_analyst.create_http_client())
     summary_ticker_task = loop.create_task(summary_ticker(store))
-    print("Summary generation ticker started.")
+    print("✅ Summary generation ticker started.")
     
     # 4. Configure and run the server
     config_uvicorn = uvicorn.Config(
         app, 
         host=config.DIRECTOR_HOST, 
         port=config.DIRECTOR_PORT, 
-        log_level="info",
-        loop="asyncio" # Tell uvicorn to use the loop we set
+        log_level="warning",  # Changed from "info" to reduce noise
+        loop="asyncio"
     )
     server = uvicorn.Server(config_uvicorn)
     
-    print("Starting Uvicorn server...")
+    print(f"🚀 Starting Uvicorn server on {config.DIRECTOR_HOST}:{config.DIRECTOR_PORT}")
     try:
         loop.run_until_complete(server.serve())
+    except KeyboardInterrupt:
+        print("\n⚠️ Keyboard interrupt received")
     except Exception as e:
-        print(f"Server error: {e}")
+        print(f"❌ Server error: {e}")
     finally:
-        print("Shutting down Uvicorn server...")
+        print("🛑 Shutting down Uvicorn server...")
         # 5. Manually run shutdown tasks
         if summary_ticker_task:
             summary_ticker_task.cancel()
         loop.run_until_complete(llm_analyst.close_http_client())
         loop.close()
-        print("Director Engine server shut down.")
+        print("✅ Director Engine server shut down.")
 
 
 if __name__ == "__main__":
-    print(f"Starting Director Engine (Brain 1) on port {config.DIRECTOR_PORT}...")
-    print(f" -> Ollama Analyst Model: {config.OLLAMA_MODEL}")
-    print(f" -> Summary Interval: {config.SUMMARY_INTERVAL_SECONDS}s")
-    print(f" -> Ollama Trigger Threshold: {config.OLLAMA_TRIGGER_THRESHOLD}")
-    print(f" -> Interjection Threshold: {config.INTERJECTION_THRESHOLD}")
+    print("="*60)
+    print("🧠 DIRECTOR ENGINE (Brain 1) - Starting...")
+    print("="*60)
+    print(f"📡 Port: {config.DIRECTOR_PORT}")
+    print(f"🤖 Ollama Model: {config.OLLAMA_MODEL}")
+    print(f"⏱️  Summary Interval: {config.SUMMARY_INTERVAL_SECONDS}s")
+    print(f"🎯 Ollama Trigger: {config.OLLAMA_TRIGGER_THRESHOLD}")
+    print(f"🚨 Interjection Threshold: {config.INTERJECTION_THRESHOLD}")
+    print("="*60)
 
-    # Open the browser
-    threading.Timer(1.5, open_browser).start() # Increased delay slightly
-    
-    # Run the server using our new robust `run_server` function
-    run_server()
+    # Start the server in the main thread (blocking)
+    # This ensures the event loop is set up before any events can be emitted
+    try:
+        # Open browser after a delay, but do it in a separate thread
+        # so it doesn't block the main thread
+        threading.Timer(2.0, open_browser).start()
+        
+        # Run the server (this blocks)
+        run_server()
+    except KeyboardInterrupt:
+        print("\n👋 Shutting down gracefully...")
+
