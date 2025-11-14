@@ -107,17 +107,17 @@ async def trigger_nami_interjection(event: EventItem, score: float) -> bool:
         print(f"[Director] FAILED to send interjection: {e}")
         return False
 
-# --- (build_summary_prompt is modified to use InputSource) ---
+# --- THIS IS THE MODIFIED FUNCTION ---
 def build_summary_prompt(events: List[EventItem]) -> Tuple[str, str]:
     """Builds a prompt for the LLM to summarize recent events."""
     
-    # --- THIS IS THE FIX ---
-    # If there are no events, return two empty strings to prevent the unpack error.
     if not events:
         return "", ""
-    # ----------------------
         
-    prompt = "You are a situation summarizer. Watched events are listed below in chronological order. Create a single, concise, 10-word-max summary of the *current* situation. Focus on the user's main activity. If nothing is happening, say 'The user is idle.'\n\n[EVENTS]\n"
+    # --- UPDATED PROMPT ---
+    # 1. Removed "10-word-max" and asked for "one or two-sentence summary"
+    # 2. Explicitly told it to "include key visual details from the 'Screen' events"
+    prompt = "You are a situation summarizer. Watched events are listed below in chronological order. Create a brief, one or two-sentence summary of the *current* situation. Focus on the user's main activity and **include key visual details from the 'Screen' events.** If nothing is happening, say 'The user is idle.'\n\n[EVENTS]\n"
     
     event_lines = []
     for event in events:
@@ -148,7 +148,8 @@ def build_summary_prompt(events: List[EventItem]) -> Tuple[str, str]:
         prompt_context = "No events detected."
         
     prompt += prompt_context
-    prompt += "\n\n[SUMMARY (10 words max)]\n"
+    # --- UPDATED: Removed 10-word limit from the final prompt string ---
+    prompt += "\n\n[SUMMARY]\n" 
     
     # Return both the context (for the UI) and the full prompt (for the LLM)
     return prompt_context, prompt
@@ -177,7 +178,6 @@ async def generate_summary(store: ContextStore):
         if "summary:" in summary_text.lower():
             summary_text = summary_text.split(":", 1)[-1].strip()
             
-        # --- MODIFIED: Store both the summary and the raw context ---
         store.set_summary(summary_text, raw_context)
         
     except Exception as e:
