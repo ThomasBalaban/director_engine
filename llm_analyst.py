@@ -2,17 +2,15 @@
 import ollama # type: ignore
 import json
 import httpx # type: ignore
-# --- THIS IS THE FIX ---
 from config import (
     OLLAMA_MODEL, 
     OLLAMA_HOST, 
     NAMI_INTERJECT_URL, 
     INTERJECTION_THRESHOLD, 
-    InputSource # <--- THIS IMPORT WAS MISSING
+    InputSource
 )
-# ----------------------
 from context_store import ContextStore, EventItem
-from typing import List
+from typing import List, Tuple
 
 http_client: httpx.AsyncClient | None = None
 
@@ -110,10 +108,14 @@ async def trigger_nami_interjection(event: EventItem, score: float) -> bool:
         return False
 
 # --- (build_summary_prompt is modified to use InputSource) ---
-def build_summary_prompt(events: List[EventItem]) -> str:
+def build_summary_prompt(events: List[EventItem]) -> Tuple[str, str]:
     """Builds a prompt for the LLM to summarize recent events."""
+    
+    # --- THIS IS THE FIX ---
+    # If there are no events, return two empty strings to prevent the unpack error.
     if not events:
-        return ""
+        return "", ""
+    # ----------------------
         
     prompt = "You are a situation summarizer. Watched events are listed below in chronological order. Create a single, concise, 10-word-max summary of the *current* situation. Focus on the user's main activity. If nothing is happening, say 'The user is idle.'\n\n[EVENTS]\n"
     

@@ -72,8 +72,6 @@ async def serve_audio_effect(filename: str):
         return {"error": "Access denied"}
     return FileResponse(file_path, media_type="audio/wav")
 
-app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
-
 # --- Pydantic Models ---
 class EventPayload(BaseModel):
     source_str: str = Field(..., json_schema_extra={"example": "VISUAL_CHANGE"})
@@ -187,6 +185,7 @@ async def receive_bot_reply(sid, payload: dict):
     )
 
 # --- HTTP Endpoints ---
+# *** FIX: MOVED THESE ROUTES *BEFORE* THE app.mount("/") CATCH-ALL ***
 @app.get("/summary", response_class=PlainTextResponse)
 async def get_summary():
     summary, _ = store.get_summary()
@@ -196,6 +195,10 @@ async def get_summary():
 async def get_breadcrumbs(count: int = 3):
     breadcrumbs = store.get_breadcrumbs(count=count)
     return breadcrumbs
+
+# --- This must come AFTER the API routes ---
+app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
+
 
 # --- Browser opener ---
 def open_browser():
