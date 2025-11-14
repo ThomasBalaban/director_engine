@@ -4,9 +4,8 @@ import asyncio
 import threading
 import webbrowser
 from pathlib import Path
-from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks # type: ignore
+from fastapi import FastAPI, BackgroundTasks # type: ignore
 from fastapi.staticfiles import StaticFiles # type: ignore
 from fastapi.responses import FileResponse, PlainTextResponse # type: ignore
 from pydantic import BaseModel, Field # type: ignore
@@ -18,13 +17,22 @@ import llm_analyst
 from context_store import ContextStore, EventItem
 from scoring import calculate_event_score
 
-# --- Global variable for the loop ---
+# --- Global variables ---
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
+server_ready: bool = False  # NEW: Flag to prevent emissions before loop is ready
 
 async def summary_ticker(store: ContextStore):
     """A background task that periodically generates a new summary."""
-    await asyncio.sleep(5) # Wait for context to build
+    global server_ready
+    
+    # Wait for the server to be fully ready before starting
+    while not server_ready:
+        await asyncio.sleep(0.1)
+    
+    print("✅ Summary ticker starting (server is ready)")
+    await asyncio.sleep(5) # Wait for initial context to build
+    
     while True:
         try:
             await llm_analyst.generate_summary(store)
@@ -35,15 +43,10 @@ async def summary_ticker(store: ContextStore):
         
         await asyncio.sleep(config.SUMMARY_INTERVAL_SECONDS)
 
-# --- REMOVED: lifespan manager ---
-# @asynccontextmanager
-# async def lifespan(app: FastAPI): ...
-
 # --- Application Setup ---
 app = FastAPI(
     title="Nami Director Engine (Brain 1)",
     description="Receives, scores, and stores all context events. Provides 'breadcrumbs' to Nami (Brain 2)."
-    # --- REMOVED: lifespan=lifespan ---
 )
 store = ContextStore()
 
@@ -71,18 +74,19 @@ async def serve_audio_effect(filename: str):
 
 app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
-
-# --- (Pydantic Models are unchanged) ---
+# --- Pydantic Models ---
 class EventPayload(BaseModel):
     source_str: str = Field(..., json_schema_extra={"example": "VISUAL_CHANGE"})
     text: str = Field(..., json_schema_extra={"example": "User opened a new Chrome tab."})
     metadata: Dict[str, Any] = Field(default_factory=dict)
     username: Optional[str] = Field(None, json_schema_extra={"example": "PeepingOtter"})
+
 class EventResponse(BaseModel):
     status: str
     event_id: str
     sieve_score: float
     analysis_queued: bool
+
 class BreadcrumbItem(BaseModel):
     source: str
     text: str
@@ -92,18 +96,16 @@ class BreadcrumbItem(BaseModel):
 # --- Thread-Safe UI Emitters ---
 def _emit_threadsafe(event, data):
     """
-    A thread-safe function to schedule an emit call on the UI's event loop.
-    This is the core of the fix.
+    Thread-safe function to schedule an emit call on the UI's event loop.
     """
-    global ui_event_loop
+    global ui_event_loop, server_ready
     
-    # More defensive check
-    if ui_event_loop is None:
-        # Loop not ready yet - this can happen during startup
+    # Don't emit until the server is fully ready
+    if not server_ready:
         return
     
-    if ui_event_loop.is_closed():
-        # Loop is shutting down
+    # Check if loop exists and is not closed
+    if ui_event_loop is None or ui_event_loop.is_closed():
         return
     
     try:
@@ -119,17 +121,26 @@ def _emit_threadsafe(event, data):
     except Exception as e:
         # Other unexpected errors
         print(f"❌ UI Emit Error: Could not send event '{event}'. Reason: {e}")
-        
 
-def emit_vision_context(context): _emit_threadsafe('vision_context', {'context': context})
-def emit_spoken_word_context(context): _emit_threadsafe('spoken_word_context', {'context': context})
-def emit_audio_context(context): _emit_threadsafe('audio_context', {'context': context})
-def emit_twitch_message(username, message): _emit_threadsafe('twitch_message', {'username': username, 'message': message})
-def emit_bot_reply(reply, prompt="", is_censored=False): _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
+def emit_vision_context(context): 
+    _emit_threadsafe('vision_context', {'context': context})
+
+def emit_spoken_word_context(context): 
+    _emit_threadsafe('spoken_word_context', {'context': context})
+
+def emit_audio_context(context): 
+    _emit_threadsafe('audio_context', {'context': context})
+
+def emit_twitch_message(username, message): 
+    _emit_threadsafe('twitch_message', {'username': username, 'message': message})
+
+def emit_bot_reply(reply, prompt="", is_censored=False): 
+    _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
+
 def emit_current_summary(summary: str, raw_context: str):
     _emit_threadsafe('current_summary', {'summary': summary, 'raw_context': raw_context})
 
-# --- (Socket.IO Handlers are unchanged) ---
+# --- Socket.IO Handlers ---
 @sio.on("event")
 async def ingest_event(sid, payload: dict):
     try:
@@ -175,7 +186,7 @@ async def receive_bot_reply(sid, payload: dict):
         is_censored=payload.get('is_censored', False)
     )
 
-# --- (HTTP Endpoints /summary and /breadcrumbs are unchanged) ---
+# --- HTTP Endpoints ---
 @app.get("/summary", response_class=PlainTextResponse)
 async def get_summary():
     summary, _ = store.get_summary()
@@ -186,15 +197,18 @@ async def get_breadcrumbs(count: int = 3):
     breadcrumbs = store.get_breadcrumbs(count=count)
     return breadcrumbs
 
-# --- (open_browser is unchanged) ---
+# --- Browser opener ---
 def open_browser():
-    try: webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
-    except Exception as e: print(f"Could not open browser: {e}")
-
+    try: 
+        webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
+    except Exception as e: 
+        print(f"Could not open browser: {e}")
 
 def run_server():
     """Run the Uvicorn server in a blocking manner."""
-    global ui_event_loop, summary_ticker_task
+    global ui_event_loop, summary_ticker_task, server_ready
+    
+    print("🔧 Initializing event loop...")
     
     # 1. Create and set a new event loop for this thread
     loop = asyncio.new_event_loop()
@@ -204,17 +218,25 @@ def run_server():
     ui_event_loop = loop
     print(f"✅ UI event loop captured: {id(ui_event_loop)}")
     
-    # 3. Manually run the startup tasks that *were* in lifespan
+    # 3. Manually run the startup tasks that were in lifespan
+    print("🔧 Initializing HTTP client and starting background tasks...")
     loop.run_until_complete(llm_analyst.create_http_client())
-    summary_ticker_task = loop.create_task(summary_ticker(store))
-    print("✅ Summary generation ticker started.")
     
-    # 4. Configure and run the server
+    # Start the summary ticker task
+    summary_ticker_task = loop.create_task(summary_ticker(store))
+    print("✅ Summary generation ticker task created")
+    
+    # 4. NOW mark the server as ready - this allows emissions to proceed
+    server_ready = True
+    print("✅ Server marked as READY - emissions now enabled")
+    print("✅✅✅ DIRECTOR IS NOW READY TO ACCEPT EVENTS ✅✅✅")
+    
+    # 5. Configure and run the server
     config_uvicorn = uvicorn.Config(
         app, 
         host=config.DIRECTOR_HOST, 
         port=config.DIRECTOR_PORT, 
-        log_level="warning",  # Changed from "info" to reduce noise
+        log_level="warning",
         loop="asyncio"
     )
     server = uvicorn.Server(config_uvicorn)
@@ -228,13 +250,17 @@ def run_server():
         print(f"❌ Server error: {e}")
     finally:
         print("🛑 Shutting down Uvicorn server...")
-        # 5. Manually run shutdown tasks
+        # 6. Manually run shutdown tasks
+        server_ready = False  # Disable emissions during shutdown
         if summary_ticker_task:
             summary_ticker_task.cancel()
+            try:
+                loop.run_until_complete(summary_ticker_task)
+            except asyncio.CancelledError:
+                pass
         loop.run_until_complete(llm_analyst.close_http_client())
         loop.close()
         print("✅ Director Engine server shut down.")
-
 
 if __name__ == "__main__":
     print("="*60)
@@ -247,15 +273,11 @@ if __name__ == "__main__":
     print(f"🚨 Interjection Threshold: {config.INTERJECTION_THRESHOLD}")
     print("="*60)
 
-    # Start the server in the main thread (blocking)
-    # This ensures the event loop is set up before any events can be emitted
     try:
         # Open browser after a delay, but do it in a separate thread
-        # so it doesn't block the main thread
         threading.Timer(2.0, open_browser).start()
         
         # Run the server (this blocks)
         run_server()
     except KeyboardInterrupt:
         print("\n👋 Shutting down gracefully...")
-
