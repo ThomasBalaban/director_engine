@@ -1,9 +1,12 @@
-# director_engine/llm_analyst.py
+# Save as: director_engine/llm_analyst.py
 import ollama
 import json
 import httpx
 from config import OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL, INTERJECTION_THRESHOLD
 from context_store import ContextStore, EventItem
+
+# --- MODIFIED: Initialize client as None ---
+http_client: httpx.AsyncClient | None = None
 
 # Initialize a persistent client for Ollama
 try:
@@ -15,9 +18,6 @@ except Exception as e:
     print(f"[Analyst] ERROR: Could not connect to Ollama at {OLLAMA_HOST}. Is it running?")
     print(f"[Analyst] {e}")
     ollama_client = None
-
-# A persistent client for making HTTP calls (e.g., to trigger Nami)
-http_client = httpx.AsyncClient()
 
 
 def build_analysis_prompt(text: str) -> str:
@@ -33,7 +33,14 @@ Event: "{text}"
 def parse_llm_response(response_text: str) -> float | None:
     """Safely parses the JSON string response from the LLM."""
     try:
-        data = json.loads(response_text)
+        # Find the first { and last } to handle potential junk
+        start = response_text.find('{')
+        end = response_text.rfind('}') + 1
+        if start == -1 or end == 0:
+            raise json.JSONDecodeError("No JSON object found", response_text, 0)
+            
+        json_str = response_text[start:end]
+        data = json.loads(json_str)
         score = data.get("score")
         if isinstance(score, (float, int)):
             return max(0.0, min(float(score), 1.0)) # Clamp score between 0 and 1
@@ -91,6 +98,11 @@ async def trigger_nami_interjection(event: EventItem, score: float) -> bool:
     Proactively sends a high-priority "interject" event to Nami's
     Input Funnel (Brain 2).
     """
+    global http_client
+    if not http_client:
+        print("[Director] FAILED to send interjection: HTTP client not initialized.")
+        return False
+
     try:
         interject_payload = {
             "content": event.text,
@@ -102,7 +114,6 @@ async def trigger_nami_interjection(event: EventItem, score: float) -> bool:
             }
         }
         
-        # We will implement the receiving end of this in Nami later
         response = await http_client.post(NAMI_INTERJECT_URL, json=interject_payload, timeout=2.0)
         
         if response.status_code == 200:
@@ -119,6 +130,19 @@ async def trigger_nami_interjection(event: EventItem, score: float) -> bool:
         print(f"[Director] FAILED to send interjection: {e}")
         return False
 
+# --- ADDED: This function was missing ---
+async def create_http_client():
+    """Creates the persistent HTTP client on startup."""
+    global http_client
+    if http_client is None:
+        http_client = httpx.AsyncClient()
+        print("[Director] HTTP client created.")
+
+# --- MODIFIED: This function now properly closes the client ---
 async def close_http_client():
     """Closes the persistent HTTP client."""
-    await http_client.aclose()
+    global http_client
+    if http_client:
+        await http_client.aclose()
+        http_client = None
+        print("[Director] HTTP client closed.")
