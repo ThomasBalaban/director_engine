@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nami's Brain</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+    <style>
+        body {
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            font-family: 'Inter', sans-serif;
+        }
+
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+        .panel {
+            background-color: #2a2a2a;
+            border: 1px solid #444;
+            border-radius: 0.75rem;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .panel-title {
+            background-color: #3a3a3a;
+            color: #fff;
+            padding: 0.75rem 1.25rem;
+            font-weight: 600;
+            border-bottom: 1px solid #444;
+            flex-shrink: 0;
+        }
+
+        .panel-content {
+            padding: 1.25rem;
+            overflow-y: auto;
+            flex-grow: 1;
+        }
+
+        .log-list {
+            font-family: 'monospace';
+            font-size: 0.875rem;
+        }
+
+        .log-list .log-line {
+            padding: 0.25rem 0.25rem 0.25rem 0.5rem;
+        }
+
+        .log-error {
+            color: #ff8a8a;
+        }
+
+        .twitch-user {
+            color: #a970ff;
+            font-weight: 600;
+        }
+
+        .nami-reply {
+            color: #63e2b7;
+        }
+
+        .context-box {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .mention-bg {
+            background-color: rgba(169, 112, 255, 0.1);
+            border-left: 3px solid #a970ff;
+            border-radius: 4px;
+        }
+
+        .highlight-word {
+            color: #d8b4fe;
+            font-weight: 600;
+            background-color: rgba(169, 112, 255, 0.2);
+            padding: 1px 4px;
+            border-radius: 4px;
+        }
+
+        .censored-reply {
+            background-color: rgba(239, 68, 68, 0.2) !important; /* Red background with transparency */
+            border-left: 3px solid #ef4444 !important; /* Red left border */
+            border-radius: 4px !important;
+            padding: 0.25rem 0.5rem !important;
+        }
+
+        .censored-indicator {
+            color: #ef4444;
+            font-weight: 600;
+            font-size: 0.75rem;
+            margin-left: 0.5rem;
+        }
+    </style>
+</head>
+
+<body class="h-screen overflow-hidden flex flex-col p-4 md:p-6 lg:p-8">
+    <div class="max-w-screen-2xl mx-auto w-full flex flex-col flex-1 min-h-0">
+        <header class="mb-6 flex-shrink-0">
+            <h1 class="text-3xl font-bold text-white">Director Engine <span class="text-sm font-medium text-gray-400">|
+                    Nami's Brain 1 (Context Monitor)</span></h1>
+        </header>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
+
+            <div class="flex flex-col gap-6 min-h-0">
+                <div id="vision-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">👁️ Vision Context (Last 12s)</h2>
+                    <div class="panel-content">
+                        <pre class="context-box" id="vision-context">Waiting for vision data...</pre>
+                    </div>
+                </div>
+                <div id="spoken-word-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">🎤 Spoken Word (Last 30s)</h2>
+                    <div class="panel-content">
+                        <pre class="context-box" id="spoken-word-context">Waiting for spoken word data...</pre>
+                    </div>
+                </div>
+                <div id="audio-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">🔊 Desktop Audio (Last 12s)</h2>
+                    <div class="panel-content">
+                        <pre class="context-box" id="audio-context">Waiting for audio data...</pre>
+                    </div>
+                </div>
+            </div>
+
+            <div class="flex flex-col gap-6 min-h-0">
+                <div id="twitch-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">💬 Twitch Chat Context (Last 20)</h2>
+                    <div class="panel-content log-list" id="twitch-messages"></div>
+                </div>
+                <div id="nami-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">🤖 Nami's Replies (via Brain 2)</h2>
+                    <div class="panel-content log-list" id="nami-replies">
+                        </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io("http://localhost:8002"); // Port is set in config.py
+
+        const visionContext = document.getElementById('vision-context');
+        const spokenWordContext = document.getElementById('spoken-word-context');
+        const audioContext = document.getElementById('audio-context');
+        const twitchMessages = document.getElementById('twitch-messages');
+        const namiReplies = document.getElementById('nami-replies');
+
+        const MAX_CONSOLE_LINES = 100;
+        const twitchChatLog = [];
+        const MAX_TWITCH_CONTEXT_LINES = 20;
+        const visionLog = [];
+        const spokenWordLog = [];
+        const audioLog = [];
+        const MAX_AMBIENT_LOG_LINES = 20;
+
+        function sanitizeHTML(str) {
+            const temp = document.createElement('div');
+            temp.textContent = str;
+            return temp.innerHTML;
+        }
+
+        function highlightMentions(message) {
+            const sanitizedMessage = sanitizeHTML(message);
+            const regex = /(nami|peepingnami)/gi;
+            return sanitizedMessage.replace(regex, '<span class="highlight-word">$&</span>');
+        }
+
+        function appendLog(element, content, maxLines = MAX_CONSOLE_LINES) {
+            element.insertAdjacentHTML('beforeend', content);
+            while (element.children.length > maxLines) {
+                element.removeChild(element.firstChild);
+            }
+            element.scrollTop = element.scrollHeight;
+        }
+
+        function updateAmbientLog(element, logArray, newText) {
+            logArray.push(newText);
+            if (logArray.length > MAX_AMBIENT_LOG_LINES) {
+                logArray.shift();
+            }
+            element.textContent = logArray.join('\n\n');
+            const panelContent = element.parentElement;
+            panelContent.scrollTop = panelContent.scrollHeight;
+        }
+
+        socket.on('vision_context', (data) => {
+            updateAmbientLog(visionContext, visionLog, data.context);
+        });
+
+        socket.on('spoken_word_context', (data) => {
+            updateAmbientLog(spokenWordContext, spokenWordLog, data.context);
+        });
+
+        socket.on('audio_context', (data) => {
+            updateAmbientLog(audioContext, audioLog, data.context);
+        });
+
+        socket.on('twitch_message', (data) => {
+            twitchChatLog.push(data);
+            if (twitchChatLog.length > MAX_TWITCH_CONTEXT_LINES) {
+                twitchChatLog.shift();
+            }
+
+            twitchMessages.innerHTML = '';
+            twitchChatLog.forEach(msg => {
+                const isMention = /(nami|peepingnami)/gi.test(msg.message);
+                const bgClass = isMention ? 'mention-bg' : '';
+                const formattedMessage = highlightMentions(msg.message);
+
+                const messageHTML = `
+                    <div class="log-line ${bgClass}">
+                        <span class="twitch-user">${sanitizeHTML(msg.username)}:</span>
+                        <span>${formattedMessage}</span>
+                    </div>`;
+                twitchMessages.insertAdjacentHTML('beforeend', messageHTML);
+            });
+            twitchMessages.scrollTop = twitchMessages.scrollHeight;
+        });
+
+        // This app (Brain 1) won't emit 'bot_reply', but we leave the listener
+        // in case Nami (Brain 2) is configured to send its replies here.
+        socket.on('bot_reply', (data) => {
+            console.log('Received bot_reply:', data);
+            
+            const sanitizedReply = sanitizeHTML(data.reply);
+            const isCensored = data.is_censored || false;
+
+            const censorshipClass = isCensored ? 'censored-reply' : '';
+            const censorshipIndicator = isCensored ? '<span class="censored-indicator">🚨 FILTERED</span>' : '';
+
+            const replyHTML = `
+          <div class="log-line nami-reply group cursor-pointer ${censorshipClass}"
+               data-reply="${encodeURIComponent(data.reply || '')}"
+               data-sent="${encodeURIComponent(data.prompt || '')}"
+               data-censored="${isCensored}">
+              <strong>Nami:</strong> ${sanitizedReply}${censorshipIndicator}
+          </div>`;
+
+            appendLog(namiReplies, replyHTML, 50);
+        });
+    </script>
+</body>
+</html>
