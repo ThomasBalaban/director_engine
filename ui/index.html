@@ -7,6 +7,9 @@
     <title>Nami's Brain</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    
     <style>
         body {
             background-color: #1a1a1a;
@@ -14,7 +17,7 @@
             font-family: 'Inter', sans-serif;
         }
 
-        @import url('https://fonts.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
         .panel {
             background-color: #2a2a2a;
@@ -35,8 +38,9 @@
         }
 
         .panel-content {
+            /* This is critical: ensures content scrolls *inside* the flexed panel */
             padding: 1.25rem;
-            overflow-y: auto;
+            overflow-y: auto; 
             flex-grow: 1;
         }
 
@@ -119,6 +123,15 @@
             padding-top: 0.5rem;
             white-space: pre-wrap;
         }
+
+        /* Ensure canvas inside its container fills all space */
+        #interest-chart {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
     </style>
 </head>
 
@@ -132,7 +145,7 @@
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
             
             <div class="flex flex-col gap-6 min-h-0">
-                <div id="summary-panel" class="panel flex-none">
+                <div id="summary-panel" class="panel flex-1 min-h-0">
                     <h2 class="panel-title">🧠 LLM Summary (Current Situation)</h2>
                     <div class="panel-content">
                         <div id="current-summary-box" class="summary-box">
@@ -144,11 +157,13 @@
                 
                 <div id="interest-graph-panel" class="panel flex-1 min-h-0">
                     <h2 class="panel-title">📈 Event Interest Graph</h2>
-                    <div class="panel-content">
-                        <div id="graph-placeholder" style="height: 100%; min-height: 150px; background-color: #1f1f1f; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #777;">
-                            <p>Data stream active. (Graph rendering requires Chart.js/Plotly)</p>
-                            <pre id="graph-data-log" class="text-xs mt-2 text-gray-400 w-full p-2 max-h-48 overflow-y-auto" style="text-align: left;">[Latest Scores Log]</pre>
+                    <div class="panel-content flex flex-col"> 
+                        <div class="flex-1 relative" style="width:100%; min-height: 150px;"> 
+                            <canvas id="interest-chart"></canvas>
                         </div>
+                        <pre id="graph-data-log" class="text-xs text-gray-400 flex-none h-24 overflow-y-auto pt-2 border-t border-gray-700" style="padding-top: 0.5rem; white-space: pre-wrap; margin-top: 0.5rem;">
+                            [Latest Scores Log]
+                        </pre>
                     </div>
                 </div>
             </div>
@@ -186,7 +201,7 @@
                 </div>
             </div>
         </div>
-        </div>
+    </div>
 
     <script>
         const socket = io("http://localhost:8002"); // Port is set in config.py
@@ -201,10 +216,79 @@
         const currentSummaryEl = document.getElementById('current-summary-box').querySelector('.summary-text');
         const summaryRawContextEl = document.getElementById('summary-raw-context');
 
-        // --- Graph Elements and Data ---
+        // --- Chart.js Setup ---
+        const CHART_HISTORY_SIZE = 50; // Keep the last 50 data points visible
+        let interestChart;
+        const scoreLabels = [];   // Timestamps for X-axis
+        const scoreData = [];     // Scores for Y-axis
         const graphDataLogEl = document.getElementById('graph-data-log');
         const graphData = [];
-        const MAX_GRAPH_DATA = 10; // Only keep 10 data points for display log
+        const MAX_GRAPH_DATA = 10; 
+
+        function initializeChart() {
+            if (typeof Chart === 'undefined') {
+                console.error("Chart.js failed to load! Check your internet connection or the script tag.");
+                document.getElementById('interest-graph-panel').querySelector('.panel-content').innerHTML = 
+                    "<div class='text-red-500 p-4'>Error: Chart.js library could not be loaded.</div>";
+                return;
+            }
+
+            const ctx = document.getElementById('interest-chart').getContext('2d');
+            interestChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: scoreLabels,
+                    datasets: [{
+                        label: 'Event Interest Score',
+                        data: scoreData,
+                        borderColor: '#63e2b7', // Nami's color
+                        backgroundColor: 'rgba(99, 226, 183, 0.2)',
+                        tension: 0.3,
+                        pointRadius: 2,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    animation: {
+                        duration: 0 
+                    },
+                    scales: {
+                        y: {
+                            min: 0.0,
+                            max: 1.0,
+                            title: {
+                                display: true,
+                                text: 'Score',
+                                color: '#e0e0e0'
+                            },
+                            ticks: { color: '#e0e0e0' },
+                            grid: { color: '#444' }
+                        },
+                        x: {
+                            ticks: { color: '#e0e0e0' },
+                            grid: { color: '#444' }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        },
+                        tooltip: {
+                            enabled: true,
+                            backgroundColor: '#3a3a3a',
+                            titleColor: '#fff',
+                            bodyColor: '#fff',
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Initialize the chart once the page is fully loaded
+        window.onload = initializeChart;
+
 
         const MAX_CONSOLE_LINES = 100;
         const twitchChatLog = [];
@@ -264,25 +348,35 @@
         });
         // --- End Summary Listener ---
         
-        // --- NEW Interest Graph Listener ---
+        // --- Interest Graph Listener ---
         socket.on('event_scored', (data) => {
-            console.log('Received event_scored:', data);
-
             const timestamp = new Date(data.timestamp * 1000).toLocaleTimeString();
-            const logEntry = `[${timestamp}] ${data.source}: ${data.score.toFixed(2)} - ${data.text.substring(0, 30)}...`;
+            
+            // Format for log display
+            const logEntry = `${data.score.toFixed(2)}  - [${timestamp}] ${data.source}:- ${data.text.substring(0, 30)}...`;
 
-            // Log data for display purposes
+            // Update Chart Data
+            if (interestChart) {
+                scoreLabels.push(new Date(data.timestamp * 1000).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+                scoreData.push(data.score.toFixed(2));
+
+                if (scoreData.length > CHART_HISTORY_SIZE) {
+                    scoreLabels.shift();
+                    scoreData.shift();
+                }
+
+                interestChart.update('none'); 
+            }
+
+            // Update Log display
             graphData.push(logEntry);
             if (graphData.length > MAX_GRAPH_DATA) {
                 graphData.shift();
             }
             graphDataLogEl.textContent = graphData.join('\n');
             graphDataLogEl.scrollTop = graphDataLogEl.scrollHeight;
-
-            // In a real implementation, you would call a charting library function here
-            // e.g. updateChart({ time: data.timestamp, score: data.score });
         });
-        // --- END NEW Interest Graph Listener ---
+        // --- End Interest Graph Listener ---
 
         socket.on('twitch_message', (data) => {
             twitchChatLog.push(data);
