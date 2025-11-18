@@ -14,7 +14,7 @@
             font-family: 'Inter', sans-serif;
         }
 
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
         .panel {
             background-color: #2a2a2a;
@@ -82,8 +82,10 @@
         }
 
         .censored-reply {
-            background-color: rgba(239, 68, 68, 0.2) !important; /* Red background with transparency */
-            border-left: 3px solid #ef4444 !important; /* Red left border */
+            background-color: rgba(239, 68, 68, 0.2) !important;
+            /* Red background with transparency */
+            border-left: 3px solid #ef4444 !important;
+            /* Red left border */
             border-radius: 4px !important;
             padding: 0.25rem 0.5rem !important;
         }
@@ -93,6 +95,29 @@
             font-weight: 600;
             font-size: 0.75rem;
             margin-left: 0.5rem;
+        }
+        
+        /* New style for the summary panel */
+        .summary-box {
+            background-color: #333333;
+            border: 1px solid #555;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .summary-text {
+            font-size: 1rem;
+            font-weight: 500;
+            color: #ffffff;
+            line-height: 1.5;
+        }
+        .summary-raw-context {
+            font-size: 0.75rem;
+            color: #aaaaaa;
+            margin-top: 1rem;
+            border-top: 1px dashed #444;
+            padding-top: 0.5rem;
+            white-space: pre-wrap;
         }
     </style>
 </head>
@@ -104,7 +129,29 @@
                     Nami's Brain 1 (Context Monitor)</span></h1>
         </header>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 flex-1 min-h-0">
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
+            
+            <div class="flex flex-col gap-6 min-h-0">
+                <div id="summary-panel" class="panel flex-none">
+                    <h2 class="panel-title">🧠 LLM Summary (Current Situation)</h2>
+                    <div class="panel-content">
+                        <div id="current-summary-box" class="summary-box">
+                            <p class="summary-text">Waiting for first summary generation...</p>
+                            <pre id="summary-raw-context" class="summary-raw-context">Raw context will appear here...</pre>
+                        </div>
+                    </div>
+                </div>
+                
+                <div id="interest-graph-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">📈 Event Interest Graph</h2>
+                    <div class="panel-content">
+                        <div id="graph-placeholder" style="height: 100%; min-height: 150px; background-color: #1f1f1f; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #777;">
+                            <p>Data stream active. (Graph rendering requires Chart.js/Plotly)</p>
+                            <pre id="graph-data-log" class="text-xs mt-2 text-gray-400 w-full p-2 max-h-48 overflow-y-auto" style="text-align: left;">[Latest Scores Log]</pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
 
             <div class="flex flex-col gap-6 min-h-0">
                 <div id="vision-panel" class="panel flex-1 min-h-0">
@@ -135,11 +182,11 @@
                 <div id="nami-panel" class="panel flex-1 min-h-0">
                     <h2 class="panel-title">🤖 Nami's Replies (via Brain 2)</h2>
                     <div class="panel-content log-list" id="nami-replies">
-                        </div>
+                    </div>
                 </div>
             </div>
         </div>
-    </div>
+        </div>
 
     <script>
         const socket = io("http://localhost:8002"); // Port is set in config.py
@@ -149,6 +196,15 @@
         const audioContext = document.getElementById('audio-context');
         const twitchMessages = document.getElementById('twitch-messages');
         const namiReplies = document.getElementById('nami-replies');
+        
+        // --- Summary Elements ---
+        const currentSummaryEl = document.getElementById('current-summary-box').querySelector('.summary-text');
+        const summaryRawContextEl = document.getElementById('summary-raw-context');
+
+        // --- Graph Elements and Data ---
+        const graphDataLogEl = document.getElementById('graph-data-log');
+        const graphData = [];
+        const MAX_GRAPH_DATA = 10; // Only keep 10 data points for display log
 
         const MAX_CONSOLE_LINES = 100;
         const twitchChatLog = [];
@@ -199,6 +255,34 @@
         socket.on('audio_context', (data) => {
             updateAmbientLog(audioContext, audioLog, data.context);
         });
+        
+        // --- Summary Listener ---
+        socket.on('current_summary', (data) => {
+            console.log('Received current_summary:', data);
+            currentSummaryEl.textContent = data.summary || 'Summary not available.';
+            summaryRawContextEl.textContent = data.raw_context || 'Raw context not available.';
+        });
+        // --- End Summary Listener ---
+        
+        // --- NEW Interest Graph Listener ---
+        socket.on('event_scored', (data) => {
+            console.log('Received event_scored:', data);
+
+            const timestamp = new Date(data.timestamp * 1000).toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${data.source}: ${data.score.toFixed(2)} - ${data.text.substring(0, 30)}...`;
+
+            // Log data for display purposes
+            graphData.push(logEntry);
+            if (graphData.length > MAX_GRAPH_DATA) {
+                graphData.shift();
+            }
+            graphDataLogEl.textContent = graphData.join('\n');
+            graphDataLogEl.scrollTop = graphDataLogEl.scrollHeight;
+
+            // In a real implementation, you would call a charting library function here
+            // e.g. updateChart({ time: data.timestamp, score: data.score });
+        });
+        // --- END NEW Interest Graph Listener ---
 
         socket.on('twitch_message', (data) => {
             twitchChatLog.push(data);
@@ -222,27 +306,122 @@
             twitchMessages.scrollTop = twitchMessages.scrollHeight;
         });
 
-        // This app (Brain 1) won't emit 'bot_reply', but we leave the listener
-        // in case Nami (Brain 2) is configured to send its replies here.
         socket.on('bot_reply', (data) => {
             console.log('Received bot_reply:', data);
-            
+
             const sanitizedReply = sanitizeHTML(data.reply);
             const isCensored = data.is_censored || false;
 
             const censorshipClass = isCensored ? 'censored-reply' : '';
             const censorshipIndicator = isCensored ? '<span class="censored-indicator">🚨 FILTERED</span>' : '';
 
+            // Row HTML with conditional styling
             const replyHTML = `
-          <div class="log-line nami-reply group cursor-pointer ${censorshipClass}"
-               data-reply="${encodeURIComponent(data.reply || '')}"
-               data-sent="${encodeURIComponent(data.prompt || '')}"
-               data-censored="${isCensored}">
-              <strong>Nami:</strong> ${sanitizedReply}${censorshipIndicator}
-          </div>`;
+            <div class="log-line nami-reply group cursor-pointer ${censorshipClass}"
+                data-reply="${encodeURIComponent(data.reply || '')}"
+                data-sent="${encodeURIComponent(data.prompt || '')}"
+                data-censored="${isCensored}">
+                <strong>Nami:</strong> ${sanitizedReply}${censorshipIndicator}
+                <span class="ml-2 opacity-0 group-hover:opacity-100 text-xs text-gray-400 align-middle">📄 Context</span>
+            </div>`;
 
+            // Append to list
             appendLog(namiReplies, replyHTML, 50);
+
+            // Wire the click for the LAST inserted element
+            const lastRow = namiReplies.lastElementChild;
+
+            lastRow.addEventListener('click', () => {
+                // Pull raw values, decode, and open drawer
+                const replyText = decodeURIComponent(lastRow.getAttribute('data-reply') || '');
+                const sentText = decodeURIComponent(lastRow.getAttribute('data-sent') || '');
+                const wasCensored = lastRow.getAttribute('data-censored') === 'true';
+
+                // For display, we use textContent (no HTML). This keeps it safe & readable.
+                openDrawer({
+                    sentMessage: sentText,
+                    replyText: replyText,
+                    wasCensored: wasCensored
+                });
+            });
         });
     </script>
+    
+    <div id="context-drawer-overlay" class="fixed inset-0 bg-black/50 hidden" onclick="closeDrawer()"></div>
+
+    <aside id="context-drawer" class="fixed top-0 right-0 h-screen w-full max-w-md translate-x-full transition-transform duration-200 ease-out
+                bg-[#2a2a2a] border-l border-[#444] shadow-xl flex flex-col z-50">
+
+        <div class="p-3 border-b border-[#444] flex items-center justify-between">
+            <h3 class="text-sm font-semibold text-white">Nami Prompt Details</h3>
+            <button class="text-gray-400 hover:text-white" onclick="closeDrawer()"
+                aria-label="Close context panel">✕</button>
+        </div>
+
+        <div class="flex-1 overflow-y-auto">
+            <div class="p-4">
+                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">Full Prompt Sent to Gemini</div>
+                <pre id="drawer-sent"
+                    class="whitespace-pre-wrap break-words text-sm bg-[#1f1f1f] border border-[#3a3a3a] rounded-md p-3"></pre>
+            </div>
+
+            <div class="px-4 pb-4">
+                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">Nami’s Raw Reply</div>
+                <pre id="drawer-reply"
+                    class="whitespace-pre-wrap break-words text-sm bg-[#1f1f1f] border border-[#3a3a3a] rounded-md p-3"></pre>
+            </div>
+        </div>
+
+        <div class="p-3 border-t border-[#444] text-xs text-gray-500">
+            </div>
+    </aside>
+
+    <script>
+        // --- Drawer helpers ---
+         function openDrawer({ sentMessage, replyText, wasCensored = false }) {
+            const overlay = document.getElementById('context-drawer-overlay');
+            const drawer = document.getElementById('context-drawer');
+            const sentEl = document.getElementById('drawer-sent');
+            const replyEl = document.getElementById('drawer-reply');
+
+            sentEl.textContent = sentMessage || '(not provided)';
+            
+            // Add censorship warning to reply if needed
+            if (wasCensored) {
+                replyEl.innerHTML = `<div style="color: #ef4444; font-weight: 600; margin-bottom: 0.5rem;">🚨 CONTENT FILTERED - Original Response:</div>`;
+                const replyTextEl = document.createElement('div');
+                replyTextEl.textContent = replyText || '(not provided)';
+                replyEl.appendChild(replyTextEl);
+                replyEl.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+                replyEl.style.borderColor = '#ef4444';
+            } else {
+                replyEl.textContent = replyText || '(not provided)';
+                replyEl.style.backgroundColor = '#1f1f1f';
+                replyEl.style.borderColor = '#3a3a3a';
+            }
+
+            overlay.classList.remove('hidden');
+            drawer.classList.remove('translate-x-full');
+            // Optional: prevent page scroll while drawer open
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeDrawer() {
+            const overlay = document.getElementById('context-drawer-overlay');
+            const drawer = document.getElementById('context-drawer');
+
+            overlay.classList.add('hidden');
+            drawer.classList.add('translate-x-full');
+            document.body.style.overflow = '';
+        }
+
+        // Close on Escape
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeDrawer();
+        });
+
+        // The bestEffortSentMessageFrom function is no longer needed since the Python side is sending the context explicitly in the 'prompt' field.
+    </script>
 </body>
+
 </html>
