@@ -37,7 +37,7 @@ NAMI_INTERJECT_URL = "http://localhost:8000/funnel/interject"
 # --- MEMORY & PREDICTION CONFIG ---
 # Events with a score above this are saved to "Long Term Memory"
 # *** CHANGED TO 0.1 FOR TESTING (Normally 0.85) ***
-MEMORY_THRESHOLD = 0.1 
+MEMORY_THRESHOLD = 0.7
 # How many top memories to send to Brain 2 (Active/Primary memories)
 PRIMARY_MEMORY_COUNT = 5
 
