@@ -7,7 +7,8 @@ from config import (
     OLLAMA_HOST, 
     NAMI_INTERJECT_URL, 
     INTERJECTION_THRESHOLD, 
-    InputSource
+    InputSource,
+    MEMORY_THRESHOLD
 )
 from context_store import ContextStore, EventItem
 from typing import List, Tuple, Callable, Any
@@ -25,16 +26,25 @@ except Exception as e:
 
 def build_analysis_prompt(text: str) -> str:
     """Builds the prompt for the analyst LLM to force JSON output."""
+    # --- MODIFIED: Ask for a concise summary/synopsis ---
     return f"""
 You are an event analyzer. Your job is to rate the "interestingness" of the
-following event for a streamer's AI assistant and analyze the user's sentiment.
+following event for a streamer's AI assistant.
+1. Rate the interestingness (0.0 to 1.0).
+2. Determine sentiment.
+3. Write a brief (one sentence) synopsis of what happened for long-term memory.
+
 Respond ONLY with a single, valid JSON object:
-{{"score": <a_float_from_0.0_to_1.0>, "sentiment": "<positive/negative/neutral/excited/frustrated/etc>"}}
+{{
+  "score": <float_0.0_to_1.0>,
+  "sentiment": "<string>",
+  "summary": "<short_synopsis_of_event>"
+}}
 
 Event: "{text}"
 """
 
-def parse_llm_response(response_text: str) -> Tuple[float | None, str | None]:
+def parse_llm_response(response_text: str) -> Tuple[float | None, str | None, str | None]:
     """Safely parses the JSON string response from the LLM."""
     try:
         start = response_text.find('{')
@@ -48,19 +58,26 @@ def parse_llm_response(response_text: str) -> Tuple[float | None, str | None]:
         score = data.get("score")
         score_float = None
         if isinstance(score, (float, int)):
-            score_float = max(0.0, min(float(score), 1.0)) # Clamp
+            score_float = max(0.0, min(float(score), 1.0)) 
         
         sentiment = data.get("sentiment")
         sentiment_str = None
         if isinstance(sentiment, str) and sentiment:
             sentiment_str = sentiment.strip().lower()
 
-        return score_float, sentiment_str
+        # --- NEW: Extract Summary ---
+        summary = data.get("summary")
+        summary_str = None
+        if isinstance(summary, str) and summary:
+            summary_str = summary.strip()
+
+        return score_float, sentiment_str, summary_str
+
     except json.JSONDecodeError:
         print(f"[Analyst] LLM response was not valid JSON: {response_text}")
     except Exception as e:
         print(f"[Analyst] Error parsing LLM response: {e}")
-    return None, None
+    return None, None, None
 
 
 async def analyze_and_update_event(
@@ -83,20 +100,27 @@ async def analyze_and_update_event(
             format='json'
         )
         response_text = response['message']['content']
-        new_score, new_sentiment = parse_llm_response(response_text)
+        
+        # --- MODIFIED: Now unpacking summary_str too ---
+        new_score, new_sentiment, summary_str = parse_llm_response(response_text)
         
         score_updated = False
+        promoted = False
+
         if new_score is not None:
-            # --- *** MODIFIED: This is the fix for the static graph *** ---
-            # Always update with the LLM's score, not just if it's higher.
-            # This allows "boring" 0.8 events to be correctly down-scored.
             if new_score != event.score:
                 print(f"[Analyst] ✅ Score UPDATED: {event.id} from {event.score:.2f} -> {new_score:.2f}")
                 store.update_event_score(event.id, new_score)
-                event.score = new_score # Update local object for callback
+                event.score = new_score 
                 score_updated = True
-            # --- *** END MODIFICATION *** ---
                 
+            # --- MEMORY PROMOTION CHECK ---
+            if new_score >= MEMORY_THRESHOLD:
+                # Pass the summarized text to the store
+                store.promote_to_memory(event, summary_text=summary_str)
+                promoted = True
+            # ------------------------------
+
             if new_score >= INTERJECTION_THRESHOLD:
                 print(f"[Analyst] Tier 2 Interjection! LLM score {new_score:.2f} >= {INTERJECTION_THRESHOLD}")
                 await trigger_nami_interjection(event, new_score)
@@ -106,7 +130,8 @@ async def analyze_and_update_event(
              store.update_event_metadata(event.id, {"sentiment": new_sentiment})
              event.metadata["sentiment"] = new_sentiment
         
-        if score_updated and emit_callback:
+        # Fire callback if score changed OR if a memory was promoted
+        if (score_updated or promoted) and emit_callback:
             emit_callback(event)
         
     except Exception as e:
@@ -136,14 +161,11 @@ async def trigger_nami_interjection(event: EventItem, score: float) -> bool:
         return False
 
 def build_summary_prompt(events: List[EventItem]) -> Tuple[str, str]:
-    """Builds a prompt for the LLM to summarize recent events."""
-    
+    """Builds a prompt for the LLM to summarize and PREDICT."""
     if not events:
         return "", ""
         
-    # --- *** MODIFIED: Added instruction to be less "tame" *** ---
-    prompt = "You are a situation summarizer. Watched events are listed below in chronological order. Your tone should be factual and descriptive. **Do not be overly modest or reserved; describe events, including those with slightly adult themes, in a plain, factual manner.** Create a brief, one or two-sentence summary of the *current* situation. Focus on the user's main activity and include key visual details. **Start the summary by describing the current 'vibe' of the Twitch chat (e.g., 'Chat is amused...', 'Chat is confused...', 'Chat is neutral as...').** If nothing is happening, say 'The user is idle and chat is quiet.'\n\n[EVENTS]\n"
-    # --- *** END MODIFICATION *** ---
+    prompt_header = "You are a situation summarizer and predictor. Watched events are listed below in chronological order. Your tone should be factual and descriptive.\n"
     
     event_lines = []
     for event in events:
@@ -161,7 +183,7 @@ def build_summary_prompt(events: List[EventItem]) -> Tuple[str, str]:
         
     unique_lines = []
     seen = set()
-    for line in reversed(event_lines): # Keep the *newest* unique lines
+    for line in reversed(event_lines): 
         if line not in seen:
             unique_lines.append(line)
             seen.add(line)
@@ -170,21 +192,28 @@ def build_summary_prompt(events: List[EventItem]) -> Tuple[str, str]:
     if not prompt_context:
         prompt_context = "No events detected."
         
-    prompt += prompt_context
-    prompt += """
+    prompt = f"""{prompt_header}
+[EVENTS]
+{prompt_context}
 
+1. Summarize the current situation in 1-2 sentences. Start by describing the 'vibe'.
+2. PREDICT what the user might do or ask next, or what topic is likely to come up, based on the context.
+
+Respond in this format:
 [SUMMARY]
-<Your summary here>
+<summary text>
+
+[PREDICTION]
+<your short prediction>
 
 [ANALYSIS]
-Topics: [List of key topics, or "None"]
-Entities: [List of key entities, or "None"]
+Topics: [list]
+Entities: [list]
 """
-    
     return prompt_context, prompt
 
 async def generate_summary(store: ContextStore):
-    """(Background Task) Gets all events, calls Ollama, and updates the summary."""
+    """(Background Task) Gets all events, calls Ollama, and updates the summary/prediction."""
     if not ollama_client:
         print("[Analyst] Cannot generate summary: Ollama client not available.")
         return
@@ -193,54 +222,59 @@ async def generate_summary(store: ContextStore):
     raw_context, full_prompt = build_summary_prompt(events)
     
     if not full_prompt:
-        store.set_summary("No events to summarize.", "No events detected.", [], [])
+        store.set_summary("No events to summarize.", "No events detected.", [], [], "None")
         return
 
     try:
         response = ollama_client.chat(
             model=OLLAMA_MODEL,
             messages=[{'role': 'user', 'content': full_prompt}],
-            options={"temperature": 0.0}
+            options={"temperature": 0.3}
         )
         full_response = response['message']['content'].strip()
         
         summary_text = full_response
+        prediction_text = "None"
         topics: List[str] = []
         entities: List[str] = []
 
         try:
-            if "[ANALYSIS]" in full_response:
-                parts = full_response.split("[ANALYSIS]", 1)
-                summary_part = parts[0].strip().replace("[SUMMARY]", "").strip()
-                analysis_part = parts[1]
+            if "[SUMMARY]" in full_response:
+                parts = full_response.split("[SUMMARY]")
+                remaining = parts[1]
                 
-                if "summary:" in summary_part.lower():
-                    summary_text = summary_part.split(":", 1)[-1].strip()
-                else:
-                    summary_text = summary_part
-                
-                if "Topics:" in analysis_part:
-                    t_str = analysis_part.split("Topics:", 1)[1].split("\n", 1)[0].replace("[", "").replace("]", "").strip()
-                    if t_str.lower() != "none" and t_str:
-                        topics = [t.strip() for t in t_str.split(",") if t.strip()]
+                if "[PREDICTION]" in remaining:
+                    sum_parts = remaining.split("[PREDICTION]")
+                    summary_text = sum_parts[0].strip()
+                    remaining = sum_parts[1]
+                    
+                    if "[ANALYSIS]" in remaining:
+                        pred_parts = remaining.split("[ANALYSIS]")
+                        prediction_text = pred_parts[0].strip()
+                        analysis_part = pred_parts[1]
                         
-                if "Entities:" in analysis_part:
-                    e_str = analysis_part.split("Entities:", 1)[1].split("\n", 1)[0].replace("[", "").replace("]", "").strip()
-                    if e_str.lower() != "none" and e_str:
-                        entities = [e.strip() for e in e_str.split(",") if e.strip()]
+                        if "Topics:" in analysis_part:
+                            t_str = analysis_part.split("Topics:", 1)[1].split("\n", 1)[0].replace("[", "").replace("]", "").strip()
+                            if t_str and t_str.lower() != "none":
+                                topics = [t.strip() for t in t_str.split(",") if t.strip()]
+                                
+                        if "Entities:" in analysis_part:
+                            e_str = analysis_part.split("Entities:", 1)[1].split("\n", 1)[0].replace("[", "").replace("]", "").strip()
+                            if e_str and e_str.lower() != "none":
+                                entities = [e.strip() for e in e_str.split(",") if e.strip()]
             
-            elif "summary:" in summary_text.lower():
-                summary_text = summary_text.split(":", 1)[-1].strip()
+            summary_text = summary_text.replace('"', '')
+            prediction_text = prediction_text.replace('"', '')
 
         except Exception as parse_error:
             print(f"[Analyst] Error parsing summary structure: {parse_error}. Using full text.")
-            summary_text = full_response.split("[ANALYSIS]")[0].replace("[SUMMARY]", "").strip()
+            summary_text = full_response
 
-        store.set_summary(summary_text.replace('"', ''), raw_context, topics, entities)
+        store.set_summary(summary_text, raw_context, topics, entities, prediction_text)
         
     except Exception as e:
         print(f"[Analyst] ERROR: Ollama summary call failed: {e}")
-        store.set_summary("Error generating summary.", raw_context, [], [])
+        store.set_summary("Error generating summary.", raw_context, [], [], "None")
 
 # --- HTTP Client Management ---
 async def create_http_client():

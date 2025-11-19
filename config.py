@@ -27,15 +27,21 @@ DIRECTOR_PORT = 8002
 DIRECTOR_HOST = "0.0.0.0"
 CONTEXT_TIME_WINDOW_SECONDS = 30.0
 
-# --- NEW: Summary Generation ---
-# *** MODIFIED: Changed from 15.0 to 8.0 for faster updates ***
-SUMMARY_INTERVAL_SECONDS = 8.0 # How often to generate a new summary
+# --- Summary Generation ---
+SUMMARY_INTERVAL_SECONDS = 8.0
 
 # --- Tier 2 "Interjection" Config ---
 INTERJECTION_THRESHOLD = 0.9
 NAMI_INTERJECT_URL = "http://localhost:8000/funnel/interject"
 
-# --- New "Analyst" (Ollama) Config ---
+# --- MEMORY & PREDICTION CONFIG ---
+# Events with a score above this are saved to "Long Term Memory"
+# *** CHANGED TO 0.1 FOR TESTING (Normally 0.85) ***
+MEMORY_THRESHOLD = 0.1 
+# How many top memories to send to Brain 2 (Active/Primary memories)
+PRIMARY_MEMORY_COUNT = 5
+
+# --- Analyst (Ollama) Config ---
 OLLAMA_TRIGGER_THRESHOLD = 0.5
 OLLAMA_MODEL = 'llama3.2:latest'
 OLLAMA_HOST = 'http://localhost:11434'

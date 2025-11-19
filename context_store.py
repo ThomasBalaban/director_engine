@@ -4,8 +4,8 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple, Optional
-from config import CONTEXT_TIME_WINDOW_SECONDS, InputSource
-import config # Import config to get OLLAMA_TRIGGER_THRESHOLD
+from config import CONTEXT_TIME_WINDOW_SECONDS, InputSource, PRIMARY_MEMORY_COUNT
+import config 
 
 @dataclass
 class EventItem:
@@ -15,24 +15,27 @@ class EventItem:
     text: str
     metadata: Dict[str, Any]
     score: float
+    # New field for the summarized version
+    memory_text: Optional[str] = None 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 class ContextStore:
     """
     Thread-safe in-memory store for all scored context events.
-    This is the "God Brain's" memory.
     """
     def __init__(self):
-        self.events: List[EventItem] = []
+        self.events: List[EventItem] = [] # Short term flow
+        self.all_memories: List[EventItem] = [] # Infinite Long term archive
         self.lock = threading.Lock()
         
         self.pending_speech_event: Optional[EventItem] = None
         self.pending_speech_lock = threading.Lock()
         
-        self.current_summary: str = "Just starting up, not sure what's happening yet."
+        self.current_summary: str = "Just starting up."
         self.summary_raw_context: str = "Waiting for events..."
         self.current_topics: List[str] = []
         self.current_entities: List[str] = []
+        self.current_prediction: str = "Observing flow..."
         self.summary_lock = threading.Lock()
 
     def add_event(self, source: InputSource, text: str, metadata: Dict[str, Any], score: float) -> EventItem:
@@ -51,32 +54,67 @@ class ContextStore:
             self._prune_events_nolock() 
             
         return item
-        
+    
+    def promote_to_memory(self, event: EventItem, summary_text: str = None):
+        """Promotes a high-scoring event to the infinite long-term memory archive."""
+        with self.lock:
+            # Check if already in memories to avoid duplicates
+            if any(m.id == event.id for m in self.all_memories):
+                return
+
+            # Save the summarized text if provided, otherwise raw text
+            event.memory_text = summary_text if summary_text else event.text
+            
+            print(f"💾 [Memory] Archiving: {event.memory_text[:50]}...")
+            self.all_memories.append(event)
+
     def _prune_events_nolock(self):
-        """Internal helper to prune events *without* acquiring the lock."""
+        """Internal helper to prune short-term events *without* acquiring the lock."""
         now = time.time()
         cutoff_time = now - CONTEXT_TIME_WINDOW_SECONDS
         self.events = [e for e in self.events if e.timestamp >= cutoff_time]
 
-    def get_breadcrumbs(self, count: int = 3) -> List[Dict[str, Any]]:
-        """Gets the Top N "most interesting" events from memory."""
+    def get_breadcrumbs(self, count: int = 3) -> Dict[str, Any]:
+        """
+        Returns a rich context object.
+        """
         with self.lock:
             self._prune_events_nolock()
-            sorted_events = sorted(self.events, key=lambda e: e.score, reverse=True)
-            top_events = sorted_events[:count]
             
-            return [
-                {
-                    "source": event.source.name,
-                    "text": event.text,
-                    "score": round(event.score, 2),
-                    "timestamp": event.timestamp
-                }
-                for event in top_events
+            # 1. Get top short-term events (Use RAW text for immediate context)
+            sorted_events = sorted(self.events, key=lambda e: e.score, reverse=True)
+            short_term = [
+                {"source": e.source.name, "text": e.text, "score": round(e.score, 2), "type": "recent"}
+                for e in sorted_events[:count]
             ]
+            
+            # 2. Get "Primary" memories (Top N from the infinite archive)
+            # Sort by score descending
+            sorted_memories = sorted(self.all_memories, key=lambda e: e.score, reverse=True)
+            primary_memories_list = sorted_memories[:PRIMARY_MEMORY_COUNT]
+            
+            long_term = []
+            for m in primary_memories_list:
+                # Use the SUMMARY text for memories if available
+                display_text = m.memory_text if m.memory_text else m.text
+                long_term.append({
+                    "source": m.source.name, 
+                    "text": display_text, 
+                    "score": round(m.score, 2), 
+                    "type": "memory"
+                })
+
+        # 3. Get prediction
+        with self.summary_lock:
+            prediction = self.current_prediction
+        
+        return {
+            "recent_events": short_term,
+            "memories": long_term,
+            "prediction": prediction
+        }
 
     def update_event_score(self, event_id: str, new_score: float) -> bool:
-        """Finds an event by its ID and updates its score."""
         with self.lock:
             for event in self.events:
                 if event.id == event_id:
@@ -85,7 +123,6 @@ class ContextStore:
         return False
 
     def update_event_metadata(self, event_id: str, metadata_update: Dict[str, Any]) -> bool:
-        """Finds an event by its ID and updates its metadata dictionary."""
         with self.lock:
             for event in self.events:
                 if event.id == event_id:
@@ -94,71 +131,57 @@ class ContextStore:
         return False
 
     def set_pending_speech(self, event: EventItem):
-        """Sets a high-priority speech event as pending for correlation."""
         with self.pending_speech_lock:
             self.pending_speech_event = event
 
     def get_and_clear_pending_speech(self, max_age_seconds: float = 3.0) -> Optional[EventItem]:
-        """Gets the pending speech event if it's recent, and then clears it."""
         with self.pending_speech_lock:
             if not self.pending_speech_event:
                 return None
-            
             now = time.time()
             if (now - self.pending_speech_event.timestamp) <= max_age_seconds:
                 event_to_return = self.pending_speech_event
                 self.pending_speech_event = None
                 return event_to_return
-            
             self.pending_speech_event = None
             return None
 
     def get_summary(self) -> Tuple[str, str]:
-        """Safely gets the current summary and its raw context."""
         with self.summary_lock:
             return self.current_summary, self.summary_raw_context
             
-    def set_summary(self, summary: str, raw_context: str, topics: List[str], entities: List[str]):
-        """Safely sets the new summary, context, topics, and entities."""
+    def set_summary(self, summary: str, raw_context: str, topics: List[str], entities: List[str], prediction: str):
         with self.summary_lock:
             self.current_summary = summary
             self.summary_raw_context = raw_context
             self.current_topics = topics
             self.current_entities = entities
+            self.current_prediction = prediction
             
     def get_all_events_for_summary(self) -> List[EventItem]:
-        """Gets all current events, sorted by time, for summary generation."""
         with self.lock:
             self._prune_events_nolock()
             return sorted(self.events, key=lambda e: e.timestamp)
 
     def get_summary_data(self) -> Dict[str, Any]:
-        """Gets the full summary object for Nami."""
         with self.summary_lock:
             return {
                 "summary": self.current_summary,
                 "raw_context": self.summary_raw_context,
                 "topics": self.current_topics,
-                "entities": self.current_entities
+                "entities": self.current_entities,
+                "prediction": self.current_prediction
             }
 
-    # --- NEW: Method to find events for re-analysis ---
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:
-        """Finds an event that is 'stale' (not yet LLM-analyzed) and has potential."""
         with self.lock:
             self._prune_events_nolock()
-            
-            # Find potential candidates: score > 0.3, not a bundle, and not yet LLM-analyzed (no sentiment)
             candidates = [
                 e for e in self.events 
                 if 0.3 < e.score < config.OLLAMA_TRIGGER_THRESHOLD 
                 and "sentiment" not in e.metadata 
                 and "is_bundle" not in e.metadata
             ]
-            
             if not candidates:
                 return None
-            
-            # Return the most recent "interesting" stale event
             return sorted(candidates, key=lambda e: e.timestamp, reverse=True)[0]
-    # --- END NEW ---

@@ -38,7 +38,6 @@
         }
 
         .panel-content {
-            /* This is critical: ensures content scrolls *inside* the flexed panel */
             padding: 1.25rem;
             overflow-y: auto; 
             flex-grow: 1;
@@ -53,18 +52,8 @@
             padding: 0.25rem 0.25rem 0.25rem 0.5rem;
         }
 
-        .log-error {
-            color: #ff8a8a;
-        }
-
-        .twitch-user {
-            color: #a970ff;
-            font-weight: 600;
-        }
-
-        .nami-reply {
-            color: #63e2b7;
-        }
+        .twitch-user { color: #a970ff; font-weight: 600; }
+        .nami-reply { color: #63e2b7; }
 
         .context-box {
             white-space: pre-wrap;
@@ -87,9 +76,7 @@
 
         .censored-reply {
             background-color: rgba(239, 68, 68, 0.2) !important;
-            /* Red background with transparency */
             border-left: 3px solid #ef4444 !important;
-            /* Red left border */
             border-radius: 4px !important;
             padding: 0.25rem 0.5rem !important;
         }
@@ -101,7 +88,6 @@
             margin-left: 0.5rem;
         }
         
-        /* New style for the summary panel */
         .summary-box {
             background-color: #333333;
             border: 1px solid #555;
@@ -115,6 +101,14 @@
             color: #ffffff;
             line-height: 1.5;
         }
+        
+        .prediction-text {
+            font-size: 1rem;
+            font-weight: 500;
+            color: #63e2b7; /* Nami Green */
+            line-height: 1.5;
+        }
+
         .summary-raw-context {
             font-size: 0.75rem;
             color: #aaaaaa;
@@ -124,7 +118,6 @@
             white-space: pre-wrap;
         }
 
-        /* Ensure canvas inside its container fills all space */
         #interest-chart {
             position: absolute;
             top: 0;
@@ -132,6 +125,12 @@
             width: 100%;
             height: 100%;
         }
+        
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1a1a1a; }
+        ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #555; }
     </style>
 </head>
 
@@ -142,21 +141,21 @@
                     Nami's Brain 1 (Context Monitor)</span></h1>
         </header>
 
-        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0">
+        <div class="grid grid-cols-1 lg:grid-cols-4 gap-6 flex-1 min-h-0">
             
             <div class="flex flex-col gap-6 min-h-0">
                 <div id="summary-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">🧠 LLM Summary (Current Situation)</h2>
+                    <h2 class="panel-title">🧠 Current Summary</h2>
                     <div class="panel-content">
                         <div id="current-summary-box" class="summary-box">
-                            <p class="summary-text">Waiting for first summary generation...</p>
+                            <p class="summary-text">Waiting for summary...</p>
                             <pre id="summary-raw-context" class="summary-raw-context">Raw context will appear here...</pre>
                         </div>
                     </div>
                 </div>
                 
                 <div id="interest-graph-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">📈 Event Interest Graph</h2>
+                    <h2 class="panel-title">📈 Interest Graph</h2>
                     <div class="panel-content flex flex-col"> 
                         <div class="flex-1 relative" style="width:100%; min-height: 150px;"> 
                             <canvas id="interest-chart"></canvas>
@@ -170,19 +169,19 @@
 
             <div class="flex flex-col gap-6 min-h-0">
                 <div id="vision-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">👁️ Vision Context (Last 12s)</h2>
+                    <h2 class="panel-title">👁️ Vision (12s)</h2>
                     <div class="panel-content">
                         <pre class="context-box" id="vision-context">Waiting for vision data...</pre>
                     </div>
                 </div>
                 <div id="spoken-word-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">🎤 Spoken Word (Last 30s)</h2>
+                    <h2 class="panel-title">🎤 Speech (30s)</h2>
                     <div class="panel-content">
                         <pre class="context-box" id="spoken-word-context">Waiting for spoken word data...</pre>
                     </div>
                 </div>
                 <div id="audio-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">🔊 Desktop Audio (Last 12s)</h2>
+                    <h2 class="panel-title">🔊 Audio (12s)</h2>
                     <div class="panel-content">
                         <pre class="context-box" id="audio-context">Waiting for audio data...</pre>
                     </div>
@@ -191,57 +190,73 @@
 
             <div class="flex flex-col gap-6 min-h-0">
                 <div id="twitch-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">💬 Twitch Chat Context (Last 20)</h2>
+                    <h2 class="panel-title">💬 Twitch Chat</h2>
                     <div class="panel-content log-list" id="twitch-messages"></div>
                 </div>
                 <div id="nami-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">🤖 Nami's Replies (via Brain 2)</h2>
+                    <h2 class="panel-title">🤖 Nami's Brain 2</h2>
                     <div class="panel-content log-list" id="nami-replies">
                     </div>
                 </div>
             </div>
+
+            <div class="flex flex-col gap-6 min-h-0">
+                <div id="prediction-panel" class="panel flex-none h-1/3 min-h-0">
+                    <h2 class="panel-title">🔮 Anticipation</h2>
+                    <div class="panel-content bg-[#252525]">
+                        <p id="prediction-text" class="prediction-text">Observing flow...</p>
+                        <p class="text-xs text-gray-500 mt-2 italic">Director's gut feeling about what happens next.</p>
+                    </div>
+                </div>
+                <div id="memory-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">💾 Active Memories</h2>
+                    <div class="panel-content">
+                        <ul id="memory-list" class="space-y-3">
+                            <li class="text-gray-500 italic text-sm">Waiting for high-impact moments...</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </div>
 
     <script>
-        const socket = io("http://localhost:8002"); // Port is set in config.py
+        const socket = io("http://localhost:8002");
 
+        // Context References
         const visionContext = document.getElementById('vision-context');
         const spokenWordContext = document.getElementById('spoken-word-context');
         const audioContext = document.getElementById('audio-context');
         const twitchMessages = document.getElementById('twitch-messages');
         const namiReplies = document.getElementById('nami-replies');
         
-        // --- Summary Elements ---
+        // Summary & Prediction References
         const currentSummaryEl = document.getElementById('current-summary-box').querySelector('.summary-text');
         const summaryRawContextEl = document.getElementById('summary-raw-context');
+        const predictionEl = document.getElementById('prediction-text');
+        const memoryListEl = document.getElementById('memory-list');
 
-        // --- Chart.js Setup ---
-        const CHART_HISTORY_SIZE = 50; // Keep the last 50 data points visible
+        // Chart.js Setup
+        const CHART_HISTORY_SIZE = 50;
         let interestChart;
-        const scoreLabels = [];   // Timestamps for X-axis
-        const scoreData = [];     // Scores for Y-axis
+        const scoreLabels = [];   
+        const scoreData = [];     
         const graphDataLogEl = document.getElementById('graph-data-log');
         const graphData = [];
         const MAX_GRAPH_DATA = 10; 
 
         function initializeChart() {
-            if (typeof Chart === 'undefined') {
-                console.error("Chart.js failed to load! Check your internet connection or the script tag.");
-                document.getElementById('interest-graph-panel').querySelector('.panel-content').innerHTML = 
-                    "<div class='text-red-500 p-4'>Error: Chart.js library could not be loaded.</div>";
-                return;
-            }
-
+            if (typeof Chart === 'undefined') return;
             const ctx = document.getElementById('interest-chart').getContext('2d');
             interestChart = new Chart(ctx, {
                 type: 'line',
                 data: {
                     labels: scoreLabels,
                     datasets: [{
-                        label: 'Event Interest Score',
+                        label: 'Interest Score',
                         data: scoreData,
-                        borderColor: '#63e2b7', // Nami's color
+                        borderColor: '#63e2b7',
                         backgroundColor: 'rgba(99, 226, 183, 0.2)',
                         tension: 0.3,
                         pointRadius: 2,
@@ -251,52 +266,20 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
-                    animation: {
-                        duration: 0 
-                    },
+                    animation: { duration: 0 },
                     scales: {
-                        y: {
-                            min: 0.0,
-                            max: 1.0,
-                            title: {
-                                display: true,
-                                text: 'Score',
-                                color: '#e0e0e0'
-                            },
-                            ticks: { color: '#e0e0e0' },
-                            grid: { color: '#444' }
-                        },
-                        x: {
-                            ticks: { color: '#e0e0e0' },
-                            grid: { color: '#444' }
-                        }
+                        y: { min: 0.0, max: 1.0, ticks: { color: '#e0e0e0' }, grid: { color: '#444' } },
+                        x: { display: false } // Hide X axis labels for cleaner look
                     },
-                    plugins: {
-                        legend: {
-                            display: false
-                        },
-                        tooltip: {
-                            enabled: true,
-                            backgroundColor: '#3a3a3a',
-                            titleColor: '#fff',
-                            bodyColor: '#fff',
-                        }
-                    }
+                    plugins: { legend: { display: false } }
                 }
             });
         }
-        
-        // Initialize the chart once the page is fully loaded
         window.onload = initializeChart;
 
-
-        const MAX_CONSOLE_LINES = 100;
-        const twitchChatLog = [];
-        const MAX_TWITCH_CONTEXT_LINES = 20;
-        const visionLog = [];
-        const spokenWordLog = [];
-        const audioLog = [];
-        const MAX_AMBIENT_LOG_LINES = 20;
+        // Helper Functions
+        const MAX_LOG_LINES = 100;
+        const MAX_PANEL_LINES = 20;
 
         function sanitizeHTML(str) {
             const temp = document.createElement('div');
@@ -310,106 +293,112 @@
             return sanitizedMessage.replace(regex, '<span class="highlight-word">$&</span>');
         }
 
-        function appendLog(element, content, maxLines = MAX_CONSOLE_LINES) {
+        function appendLog(element, content) {
             element.insertAdjacentHTML('beforeend', content);
-            while (element.children.length > maxLines) {
+            while (element.children.length > MAX_LOG_LINES) {
                 element.removeChild(element.firstChild);
             }
             element.scrollTop = element.scrollHeight;
         }
 
         function updateAmbientLog(element, logArray, newText) {
-            logArray.push(newText);
-            if (logArray.length > MAX_AMBIENT_LOG_LINES) {
-                logArray.shift();
-            }
-            element.textContent = logArray.join('\n\n');
-            const panelContent = element.parentElement;
-            panelContent.scrollTop = panelContent.scrollHeight;
+            // Simple FIFO log for ambient text panels
+            const lines = element.textContent.split('\n\n').filter(l => l.trim());
+            lines.push(newText);
+            if (lines.length > MAX_PANEL_LINES) lines.shift();
+            element.textContent = lines.join('\n\n');
+            element.parentElement.scrollTop = element.parentElement.scrollHeight;
         }
 
-        socket.on('vision_context', (data) => {
-            updateAmbientLog(visionContext, visionLog, data.context);
-        });
+        function renderMemoryList(memories) {
+            if (memories && memories.length > 0) {
+                memoryListEl.innerHTML = memories.map(mem => `
+                    <li class="border-l-2 border-purple-500 pl-3 bg-[#2a2a2a] p-2 rounded text-sm hover:bg-[#333] transition-colors">
+                        <div class="flex justify-between items-center mb-1">
+                            <span class="font-bold text-purple-400 text-xs uppercase tracking-wide">${mem.source}</span>
+                            <span class="text-xs bg-[#1a1a1a] px-2 py-0.5 rounded text-gray-400">${mem.score}</span>
+                        </div>
+                        <div class="text-gray-300 leading-snug">${sanitizeHTML(mem.text)}</div>
+                    </li>
+                `).join('');
+            } else {
+                memoryListEl.innerHTML = '<li class="text-gray-500 italic text-sm text-center mt-4">No high-impact memories yet.</li>';
+            }
+        }
 
-        socket.on('spoken_word_context', (data) => {
-            updateAmbientLog(spokenWordContext, spokenWordLog, data.context);
-        });
+        // --- Socket Listeners ---
 
-        socket.on('audio_context', (data) => {
-            updateAmbientLog(audioContext, audioLog, data.context);
-        });
+        socket.on('vision_context', (data) => updateAmbientLog(visionContext, null, data.context));
+        socket.on('spoken_word_context', (data) => updateAmbientLog(spokenWordContext, null, data.context));
+        socket.on('audio_context', (data) => updateAmbientLog(audioContext, null, data.context));
         
-        // --- Summary Listener ---
+        // Updated Summary Listener
         socket.on('current_summary', (data) => {
-            console.log('Received current_summary:', data);
+            // Update Summary Box
             currentSummaryEl.textContent = data.summary || 'Summary not available.';
             summaryRawContextEl.textContent = data.raw_context || 'Raw context not available.';
-        });
-        // --- End Summary Listener ---
-        
-        // --- Interest Graph Listener ---
-        socket.on('event_scored', (data) => {
-            const timestamp = new Date(data.timestamp * 1000).toLocaleTimeString();
             
-            // Format for log display
-            const logEntry = `${data.score.toFixed(2)}  - [${timestamp}] ${data.source}:- ${data.text.substring(0, 30)}...`;
+            // Update Prediction Panel
+            predictionEl.textContent = data.prediction || 'Observing flow...';
+            
+            // Update Memory Panel (Backup refresh)
+            renderMemoryList(data.memories);
+        });
+        
+        // NEW: Immediate Memory Update Listener
+        socket.on('memories_update', (data) => {
+            console.log("⚡ Immediate memory update received!");
+            renderMemoryList(data.memories);
+        });
 
-            // Update Chart Data
+        socket.on('event_scored', (data) => {
+            // Update Graph
             if (interestChart) {
-                scoreLabels.push(new Date(data.timestamp * 1000).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+                scoreLabels.push(""); // Empty label
                 scoreData.push(data.score.toFixed(2));
-
                 if (scoreData.length > CHART_HISTORY_SIZE) {
                     scoreLabels.shift();
                     scoreData.shift();
                 }
-
                 interestChart.update('none'); 
             }
 
-            // Update Log display
-            graphData.push(logEntry);
-            if (graphData.length > MAX_GRAPH_DATA) {
-                graphData.shift();
-            }
-            graphDataLogEl.textContent = graphData.join('\n');
+            // Update Log
+            const timestamp = new Date(data.timestamp * 1000).toLocaleTimeString();
+            const logEntry = `${data.score.toFixed(2)} - ${data.source}: ${data.text.substring(0, 25)}...`;
+            
+            const lines = graphDataLogEl.textContent.split('\n').filter(l => l.trim());
+            lines.push(logEntry);
+            if (lines.length > MAX_GRAPH_DATA) lines.shift();
+            graphDataLogEl.textContent = lines.join('\n');
             graphDataLogEl.scrollTop = graphDataLogEl.scrollHeight;
         });
-        // --- End Interest Graph Listener ---
 
         socket.on('twitch_message', (data) => {
-            twitchChatLog.push(data);
-            if (twitchChatLog.length > MAX_TWITCH_CONTEXT_LINES) {
-                twitchChatLog.shift();
+            const isMention = /(nami|peepingnami)/gi.test(data.message);
+            const bgClass = isMention ? 'mention-bg' : '';
+            const formattedMessage = highlightMentions(data.message);
+            const messageHTML = `
+                <div class="log-line ${bgClass}">
+                    <span class="twitch-user">${sanitizeHTML(data.username)}:</span>
+                    <span>${formattedMessage}</span>
+                </div>`;
+            
+            // Use specific logic for chat window
+            const container = twitchMessages;
+            container.insertAdjacentHTML('beforeend', messageHTML);
+            while (container.children.length > MAX_PANEL_LINES) {
+                container.removeChild(container.firstChild);
             }
-
-            twitchMessages.innerHTML = '';
-            twitchChatLog.forEach(msg => {
-                const isMention = /(nami|peepingnami)/gi.test(msg.message);
-                const bgClass = isMention ? 'mention-bg' : '';
-                const formattedMessage = highlightMentions(msg.message);
-
-                const messageHTML = `
-                    <div class="log-line ${bgClass}">
-                        <span class="twitch-user">${sanitizeHTML(msg.username)}:</span>
-                        <span>${formattedMessage}</span>
-                    </div>`;
-                twitchMessages.insertAdjacentHTML('beforeend', messageHTML);
-            });
-            twitchMessages.scrollTop = twitchMessages.scrollHeight;
+            container.scrollTop = container.scrollHeight;
         });
 
         socket.on('bot_reply', (data) => {
-            console.log('Received bot_reply:', data);
-
             const sanitizedReply = sanitizeHTML(data.reply);
             const isCensored = data.is_censored || false;
-
             const censorshipClass = isCensored ? 'censored-reply' : '';
             const censorshipIndicator = isCensored ? '<span class="censored-indicator">🚨 FILTERED</span>' : '';
 
-            // Row HTML with conditional styling
             const replyHTML = `
             <div class="log-line nami-reply group cursor-pointer ${censorshipClass}"
                 data-reply="${encodeURIComponent(data.reply || '')}"
@@ -419,60 +408,19 @@
                 <span class="ml-2 opacity-0 group-hover:opacity-100 text-xs text-gray-400 align-middle">📄 Context</span>
             </div>`;
 
-            // Append to list
-            appendLog(namiReplies, replyHTML, 50);
-
-            // Wire the click for the LAST inserted element
+            appendLog(namiReplies, replyHTML);
             const lastRow = namiReplies.lastElementChild;
 
             lastRow.addEventListener('click', () => {
-                // Pull raw values, decode, and open drawer
                 const replyText = decodeURIComponent(lastRow.getAttribute('data-reply') || '');
                 const sentText = decodeURIComponent(lastRow.getAttribute('data-sent') || '');
                 const wasCensored = lastRow.getAttribute('data-censored') === 'true';
-
-                // For display, we use textContent (no HTML). This keeps it safe & readable.
-                openDrawer({
-                    sentMessage: sentText,
-                    replyText: replyText,
-                    wasCensored: wasCensored
-                });
+                openDrawer({ sentMessage: sentText, replyText: replyText, wasCensored: wasCensored });
             });
         });
-    </script>
-    
-    <div id="context-drawer-overlay" class="fixed inset-0 bg-black/50 hidden" onclick="closeDrawer()"></div>
 
-    <aside id="context-drawer" class="fixed top-0 right-0 h-screen w-full max-w-md translate-x-full transition-transform duration-200 ease-out
-                bg-[#2a2a2a] border-l border-[#444] shadow-xl flex flex-col z-50">
-
-        <div class="p-3 border-b border-[#444] flex items-center justify-between">
-            <h3 class="text-sm font-semibold text-white">Nami Prompt Details</h3>
-            <button class="text-gray-400 hover:text-white" onclick="closeDrawer()"
-                aria-label="Close context panel">✕</button>
-        </div>
-
-        <div class="flex-1 overflow-y-auto">
-            <div class="p-4">
-                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">Full Prompt Sent to Gemini</div>
-                <pre id="drawer-sent"
-                    class="whitespace-pre-wrap break-words text-sm bg-[#1f1f1f] border border-[#3a3a3a] rounded-md p-3"></pre>
-            </div>
-
-            <div class="px-4 pb-4">
-                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">Nami’s Raw Reply</div>
-                <pre id="drawer-reply"
-                    class="whitespace-pre-wrap break-words text-sm bg-[#1f1f1f] border border-[#3a3a3a] rounded-md p-3"></pre>
-            </div>
-        </div>
-
-        <div class="p-3 border-t border-[#444] text-xs text-gray-500">
-            </div>
-    </aside>
-
-    <script>
-        // --- Drawer helpers ---
-         function openDrawer({ sentMessage, replyText, wasCensored = false }) {
+        // Drawer Logic
+        function openDrawer({ sentMessage, replyText, wasCensored = false }) {
             const overlay = document.getElementById('context-drawer-overlay');
             const drawer = document.getElementById('context-drawer');
             const sentEl = document.getElementById('drawer-sent');
@@ -480,42 +428,52 @@
 
             sentEl.textContent = sentMessage || '(not provided)';
             
-            // Add censorship warning to reply if needed
             if (wasCensored) {
                 replyEl.innerHTML = `<div style="color: #ef4444; font-weight: 600; margin-bottom: 0.5rem;">🚨 CONTENT FILTERED - Original Response:</div>`;
-                const replyTextEl = document.createElement('div');
-                replyTextEl.textContent = replyText || '(not provided)';
-                replyEl.appendChild(replyTextEl);
-                replyEl.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+                const textEl = document.createElement('div');
+                textEl.textContent = replyText;
+                replyEl.appendChild(textEl);
                 replyEl.style.borderColor = '#ef4444';
+                replyEl.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
             } else {
                 replyEl.textContent = replyText || '(not provided)';
-                replyEl.style.backgroundColor = '#1f1f1f';
                 replyEl.style.borderColor = '#3a3a3a';
+                replyEl.style.backgroundColor = '#1f1f1f';
             }
 
             overlay.classList.remove('hidden');
             drawer.classList.remove('translate-x-full');
-            // Optional: prevent page scroll while drawer open
             document.body.style.overflow = 'hidden';
         }
 
         function closeDrawer() {
             const overlay = document.getElementById('context-drawer-overlay');
             const drawer = document.getElementById('context-drawer');
-
             overlay.classList.add('hidden');
             drawer.classList.add('translate-x-full');
             document.body.style.overflow = '';
         }
 
-        // Close on Escape
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') closeDrawer();
-        });
-
-        // The bestEffortSentMessageFrom function is no longer needed since the Python side is sending the context explicitly in the 'prompt' field.
+        document.getElementById('context-drawer-overlay').addEventListener('click', closeDrawer);
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
     </script>
+    
+    <div id="context-drawer-overlay" class="fixed inset-0 bg-black/50 hidden z-40"></div>
+    <aside id="context-drawer" class="fixed top-0 right-0 h-screen w-full max-w-md translate-x-full transition-transform duration-200 ease-out bg-[#2a2a2a] border-l border-[#444] shadow-xl flex flex-col z-50">
+        <div class="p-3 border-b border-[#444] flex items-center justify-between">
+            <h3 class="text-sm font-semibold text-white">Nami Prompt Details</h3>
+            <button class="text-gray-400 hover:text-white" onclick="closeDrawer()">✕</button>
+        </div>
+        <div class="flex-1 overflow-y-auto">
+            <div class="p-4">
+                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">Full Prompt</div>
+                <pre id="drawer-sent" class="whitespace-pre-wrap break-words text-sm bg-[#1f1f1f] border border-[#3a3a3a] rounded-md p-3"></pre>
+            </div>
+            <div class="px-4 pb-4">
+                <div class="text-xs uppercase tracking-wide text-gray-400 mb-2">Response</div>
+                <pre id="drawer-reply" class="whitespace-pre-wrap break-words text-sm bg-[#1f1f1f] border border-[#3a3a3a] rounded-md p-3"></pre>
+            </div>
+        </div>
+    </aside>
 </body>
-
 </html>

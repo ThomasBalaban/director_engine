@@ -36,14 +36,26 @@ async def summary_ticker(store: ContextStore):
         try:
             # 1. Generate new summary
             await llm_analyst.generate_summary(store)
+            
+            # 2. Prepare data for emission
             summary_data = store.get_summary_data()
-            emit_current_summary(summary_data['summary'], summary_data['raw_context'])
+            
+            # Emit summary (which handles prediction)
+            # We also send memories here as a backup/refresh
+            breadcrumbs_context = store.get_breadcrumbs(count=5)
+            emit_current_summary(
+                summary_data['summary'], 
+                summary_data['raw_context'],
+                summary_data['prediction'],
+                breadcrumbs_context.get('memories', []) 
+            )
 
-            # 2. Re-analyze one stale event to make graph dynamic
+            # 3. Re-analyze one stale event to make graph dynamic
             stale_event = store.get_stale_event_for_analysis()
             if stale_event:
                 print(f"[Director] Ticker analyzing stale event: {stale_event.id}")
-                await llm_analyst.analyze_and_update_event(stale_event, store, emit_event_scored)
+                # Use the new handler here too!
+                await llm_analyst.analyze_and_update_event(stale_event, store, handle_analysis_complete)
 
         except Exception as e:
             print(f"[Director] Error in summary ticker: {e}")
@@ -110,8 +122,14 @@ def emit_twitch_message(username, message):
     _emit_threadsafe('twitch_message', {'username': username, 'message': message})
 def emit_bot_reply(reply, prompt="", is_censored=False): 
     _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
-def emit_current_summary(summary: str, raw_context: str):
-    _emit_threadsafe('current_summary', {'summary': summary, 'raw_context': raw_context})
+
+def emit_current_summary(summary: str, raw_context: str, prediction: str, memories: List[dict]):
+    _emit_threadsafe('current_summary', {
+        'summary': summary, 
+        'raw_context': raw_context,
+        'prediction': prediction,
+        'memories': memories
+    })
 
 def emit_event_scored(event: EventItem):
     """Emits a scored event to the UI for the graph."""
@@ -120,8 +138,29 @@ def emit_event_scored(event: EventItem):
         'timestamp': event.timestamp,
         'text': event.text,
         'source': event.source.name,
-        'id': event.id # *** MODIFIED: Pass the ID for reliable UI updates ***
+        'id': event.id 
     })
+
+def emit_memories_update(memories: List[dict]):
+    """Emits JUST the memory list to the UI for immediate updates."""
+    _emit_threadsafe('memories_update', {
+        'memories': memories
+    })
+
+# --- Callback Handler ---
+def handle_analysis_complete(event: EventItem):
+    """
+    Called when LLM analysis is finished.
+    1. Update the graph (in case score changed)
+    2. Update the memory list (in case memory was promoted)
+    """
+    # Update Graph
+    emit_event_scored(event)
+    
+    # Update Memories UI Immediately
+    breadcrumbs_context = store.get_breadcrumbs(count=5)
+    emit_memories_update(breadcrumbs_context.get('memories', []))
+
 
 # --- Socket.IO Handlers ---
 @sio.on("event")
@@ -151,6 +190,7 @@ async def ingest_event(sid, payload: dict):
     sieve_score = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
     event = store.add_event(source_enum, payload_model.text, payload_model.metadata, sieve_score)
     
+    # Emit initial graph point
     emit_event_scored(event)
     
     bg_tasks = BackgroundTasks()
@@ -167,13 +207,18 @@ async def ingest_event(sid, payload: dict):
             bundle_text = f"User reacted with '{pending_speech.text}' to the event: '{event.text}'"
             bundle_metadata = {**event.metadata, "is_bundle": True, "speech_text": pending_speech.text, "event_text": event.text}
             bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, 1.0)
+            
+            # Initial emit
             emit_event_scored(bundle_event)
-            bg_tasks.add_task(llm_analyst.analyze_and_update_event, bundle_event, store, emit_event_scored)
+            
+            # Analyze with robust callback
+            bg_tasks.add_task(llm_analyst.analyze_and_update_event, bundle_event, store, handle_analysis_complete)
             bundle_event_created = True
 
     if not bundle_event_created:
         if sieve_score >= config.OLLAMA_TRIGGER_THRESHOLD:
-            bg_tasks.add_task(llm_analyst.analyze_and_update_event, event, store, emit_event_scored)
+            # Use robust callback here too
+            bg_tasks.add_task(llm_analyst.analyze_and_update_event, event, store, handle_analysis_complete)
         elif sieve_score >= config.INTERJECTION_THRESHOLD:
             print(f"[Director] Tier 2 Interjection! Sieve score {sieve_score:.2f} >= {config.INTERJECTION_THRESHOLD}")
             bg_tasks.add_task(llm_analyst.trigger_nami_interjection, event, sieve_score)
@@ -196,10 +241,9 @@ async def get_summary():
     summary, _ = store.get_summary()
     return summary
 
-@app.get("/breadcrumbs", response_model=List[BreadcrumbItem])
+@app.get("/breadcrumbs")
 async def get_breadcrumbs(count: int = 3):
-    breadcrumbs = store.get_breadcrumbs(count=count)
-    return breadcrumbs
+    return store.get_breadcrumbs(count=count)
 
 @app.get("/summary_data")
 async def get_summary_data():
@@ -261,6 +305,7 @@ if __name__ == "__main__":
     print(f"⏱️  Summary Interval: {config.SUMMARY_INTERVAL_SECONDS}s")
     print(f"🎯 Ollama Trigger: {config.OLLAMA_TRIGGER_THRESHOLD}")
     print(f"🚨 Interjection Threshold: {config.INTERJECTION_THRESHOLD}")
+    print(f"💾 Memory Threshold: {config.MEMORY_THRESHOLD}")
     print("="*60)
 
     threading.Timer(2.0, open_browser).start()
