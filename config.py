@@ -10,6 +10,7 @@ class InputSource(Enum):
     MICROPHONE = auto()
     BOT_TWITCH_REPLY = auto()
     SYSTEM_PATTERN = auto()
+    INTERNAL_THOUGHT = auto()
 
 SOURCE_WEIGHTS = {
     InputSource.DIRECT_MICROPHONE: 0.8,
@@ -19,7 +20,8 @@ SOURCE_WEIGHTS = {
     InputSource.TWITCH_CHAT: 0.2,
     InputSource.MICROPHONE: 0.5,
     InputSource.BOT_TWITCH_REPLY: 0.0,
-    InputSource.SYSTEM_PATTERN: 0.95
+    InputSource.SYSTEM_PATTERN: 0.95,
+    InputSource.INTERNAL_THOUGHT: 0.6
 }
 
 class ConversationState(Enum):
@@ -30,7 +32,6 @@ class ConversationState(Enum):
     FRUSTRATED = "user struggling"
     CELEBRATORY = "user succeeded at something"
 
-# --- [NEW] Flow & Intent Definitions ---
 class FlowState(Enum):
     NATURAL = "natural flow"
     DRIFTING = "topic drifting"
@@ -46,44 +47,53 @@ class UserIntent(Enum):
     INFO_SEEKING = "fishing for specific info"
     PROVOKING = "trying to trigger bot"
 
-# --- [NEW] Energy System Config ---
+class BotGoal(Enum):
+    OBSERVE = "passively watch and learn"
+    ENTERTAIN = "make jokes and keep energy up"
+    SUPPORT = "help the user succeed"
+    INVESTIGATE = "learn more about the user"
+    TROLL = "create chaos and banter"
+
+class SceneType(Enum):
+    CHILL_CHATTING = "Just Chatting / Low Intensity"
+    EXPLORATION = "Gameplay Exploration / Wandering"
+    COMBAT_HIGH = "Intense Combat / Boss Fight"
+    MENUING = "In Menus / Inventory Management"
+    HORROR_TENSION = "Spooky / High Tension"
+    COMEDY_MOMENT = "Funny / Meme / Laughter"
+    TECHNICAL_DOWNTIME = "Loading / Tech Issues"
+
+# --- Energy System Config ---
 ENERGY_MAX = 100.0
 ENERGY_REGEN_PER_SEC = 2.0
-ENERGY_COST_INTERJECTION = 35.0  # Expensive to interrupt
-ENERGY_COST_REPLY = 10.0         # Cheap to reply when spoken to
-ENERGY_COST_PATTERN = 5.0        # Cheap to acknowledge patterns
+ENERGY_COST_INTERJECTION = 35.0
+ENERGY_COST_REPLY = 10.0
+ENERGY_COST_PATTERN = 5.0
+
+# --- Memory & Proactivity Config ---
+MEMORY_DECAY_RATE = 0.05 
+MEMORY_RETRIEVAL_LIMIT = 5
+CURIOSITY_INTERVAL = 45.0 
+CALLBACK_INTERVAL = 60.0 
+COMPRESSION_INTERVAL = 30.0 # [CHANGED] Lowered to 30s for faster updates
 
 # --- Director Config ---
 DIRECTOR_PORT = 8002
 DIRECTOR_HOST = "0.0.0.0"
-
-# --- Context Hierarchy Config ---
 WINDOW_IMMEDIATE = 10.0
 WINDOW_RECENT = 30.0
 WINDOW_BACKGROUND = 300.0 
-
-# --- Summary Generation ---
 SUMMARY_INTERVAL_SECONDS = 8.0
-
-# --- Tier 2 "Interjection" Config ---
 INTERJECTION_THRESHOLD = 0.9
 NAMI_INTERJECT_URL = "http://localhost:8000/funnel/interject"
-
-# --- MEMORY CONFIG ---
 MEMORY_THRESHOLD = 0.85 
 PRIMARY_MEMORY_COUNT = 5
-
-# --- USER PROFILES ---
 PROFILES_DIR = "profiles"
 DEFAULT_RELATIONSHIP_TIER = "Stranger"
 DEFAULT_AFFINITY = 0
-
-# --- MOOD ENGINE ---
 VALID_MOODS = ["Neutral", "Happy", "Annoyed", "Scared", "Horny", "Tired"]
 DEFAULT_MOOD = "Neutral"
 MOOD_WINDOW_SIZE = 5 
-
-# --- Analyst (Ollama) Config ---
 OLLAMA_TRIGGER_THRESHOLD = 0.5
 OLLAMA_MODEL = 'llama3.2:latest'
 OLLAMA_HOST = 'http://localhost:11434'

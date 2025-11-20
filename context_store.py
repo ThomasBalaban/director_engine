@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from config import (
     InputSource, PRIMARY_MEMORY_COUNT, DEFAULT_MOOD, MOOD_WINDOW_SIZE,
     WINDOW_IMMEDIATE, WINDOW_RECENT, WINDOW_BACKGROUND,
-    ConversationState, FlowState, UserIntent # [NEW IMPORTS]
+    ConversationState, FlowState, UserIntent, SceneType # [NEW IMPORT]
 )
 from scoring import EventScore
 import config
@@ -26,7 +26,11 @@ class ContextStore:
     def __init__(self):
         self.immediate: List[EventItem] = []   
         self.recent: List[EventItem] = []      
-        self.background: List[EventItem] = []  
+        self.background: List[EventItem] = []
+        
+        # [NEW] Semantic Compression Log
+        # Stores strings like "10:00-10:05: User fought the boss and died repeatedly."
+        self.narrative_log: List[str] = []
         
         self.all_memories: List[EventItem] = [] 
         self.lock = threading.Lock()
@@ -36,8 +40,9 @@ class ContextStore:
         
         # --- ENHANCED STATE TRACKING ---
         self.current_conversation_state = ConversationState.IDLE
-        self.current_flow = FlowState.NATURAL    # [NEW]
-        self.current_intent = UserIntent.CASUAL  # [NEW]
+        self.current_flow = FlowState.NATURAL
+        self.current_intent = UserIntent.CASUAL
+        self.current_scene = SceneType.CHILL_CHATTING # [NEW]
         
         self.current_summary: str = "Just starting up."
         self.summary_raw_context: str = "Waiting for events..."
@@ -59,6 +64,16 @@ class ContextStore:
             self._manage_hierarchy_nolock() 
         return item
     
+    # [NEW] Narrative Compression
+    def add_narrative_segment(self, text: str):
+        """Adds a compressed summary of past events to the permanent log."""
+        with self.lock:
+            self.narrative_log.append(text)
+            # Keep last ~50 narrative chunks (approx 2-3 hours of history)
+            if len(self.narrative_log) > 50:
+                self.narrative_log.pop(0)
+            print(f"📜 [Context] Added narrative segment: {text[:50]}...")
+
     def promote_to_memory(self, event: EventItem, summary_text: str = None):
         with self.lock:
             if any(m.id == event.id for m in self.all_memories): return
@@ -91,47 +106,51 @@ class ContextStore:
     def set_conversation_state(self, state: ConversationState):
         with self.summary_lock:
             if self.current_conversation_state != state:
-                # print(f"🔄 State Transition: {self.current_conversation_state.name} -> {state.name}")
                 self.current_conversation_state = state
 
-    # [NEW] State setters
     def set_flow_state(self, flow: FlowState):
         with self.summary_lock:
             if self.current_flow != flow:
-                print(f"🌊 Flow Change: {self.current_flow.name} -> {flow.name}")
                 self.current_flow = flow
 
     def set_user_intent(self, intent: UserIntent):
         with self.summary_lock:
             if self.current_intent != intent:
-                print(f"🎯 Intent Detected: {self.current_intent.name} -> {intent.name}")
                 self.current_intent = intent
+    
+    # [NEW] Scene Setter
+    def set_scene(self, scene: SceneType):
+        with self.summary_lock:
+            if self.current_scene != scene:
+                print(f"🎬 Scene Change: {self.current_scene.name} -> {scene.name}")
+                self.current_scene = scene
 
     def _manage_hierarchy_nolock(self):
         now = time.time()
         
+        # Move Immediate -> Recent
         to_move_recent = []
         keep_immediate = []
         for e in self.immediate:
-            age = now - e.timestamp
-            if age > WINDOW_IMMEDIATE:
+            if (now - e.timestamp) > WINDOW_IMMEDIATE:
                 to_move_recent.append(e)
             else:
                 keep_immediate.append(e)
         self.immediate = keep_immediate
         self.recent.extend(to_move_recent)
 
+        # Move Recent -> Background
         to_move_background = []
         keep_recent = []
         for e in self.recent:
-            age = now - e.timestamp
-            if age > WINDOW_RECENT:
+            if (now - e.timestamp) > WINDOW_RECENT:
                 to_move_background.append(e)
             else:
                 keep_recent.append(e)
         self.recent = keep_recent
         self.background.extend(to_move_background)
 
+        # Prune Background (BUT events here are read by Compressor before deletion)
         self.background = [e for e in self.background if (now - e.timestamp) <= WINDOW_BACKGROUND]
 
     def get_breadcrumbs(self, count: int = 3) -> Dict[str, Any]:
@@ -147,26 +166,18 @@ class ContextStore:
                 "type": "recent"
             } for e in sorted_events[:count]]
 
-            sorted_memories = sorted(self.all_memories, key=lambda e: e.score.interestingness, reverse=True)
-            primary_memories_list = sorted_memories[:PRIMARY_MEMORY_COUNT]
-            long_term = [{
-                "source": m.source.name, 
-                "text": m.memory_text or m.text, 
-                "score": round(m.score.interestingness, 2), 
-                "type": "memory"
-            } for m in primary_memories_list]
-
         with self.summary_lock:
             return {
                 "recent_events": short_term,
-                "memories": long_term,
+                # Memories will be populated by memory_ops
+                "memories": [], 
                 "prediction": self.current_prediction,
                 "current_mood": self.current_mood,
                 "conversation_state": self.current_conversation_state.name,
                 "active_user": self.active_user_profile,
-                # [NEW BREADCRUMBS]
                 "flow_state": self.current_flow.name,
-                "user_intent": self.current_intent.name
+                "user_intent": self.current_intent.name,
+                "scene": self.current_scene.name # [NEW]
             }
 
     def update_event_score(self, event_id: str, new_score: EventScore) -> bool:
@@ -231,9 +242,9 @@ class ContextStore:
                 "prediction": self.current_prediction,
                 "mood": self.current_mood,
                 "conversation_state": self.current_conversation_state.name,
-                # [NEW]
                 "flow": self.current_flow.name,
-                "intent": self.current_intent.name
+                "intent": self.current_intent.name,
+                "scene": self.current_scene.name # [NEW]
             }
 
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:
@@ -252,8 +263,7 @@ class ContextStore:
         with self.lock:
             self._manage_hierarchy_nolock()
             events = self.recent
-            if not events:
-                return 0.0, 0.0
+            if not events: return 0.0, 0.0
 
             chat_items = [e for e in events if e.source in [InputSource.TWITCH_CHAT, InputSource.TWITCH_MENTION]]
             chat_velocity = len(chat_items) * 2.0

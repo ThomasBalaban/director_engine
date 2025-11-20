@@ -19,19 +19,25 @@ from scoring import calculate_event_score, EventScore
 from user_profile_manager import UserProfileManager
 from adaptive_controller import AdaptiveController
 from correlation_engine import CorrelationEngine
-from energy_system import EnergySystem # [NEW]
+from energy_system import EnergySystem
+from behavior_engine import BehaviorEngine
+from memory_ops import MemoryOptimizer
+from context_compression import ContextCompressor
+from scene_manager import SceneManager
 
-# --- Global variables ---
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
 server_ready: bool = False
 
-# Initialize Core Systems
 store = ContextStore()
 profile_manager = UserProfileManager()
 adaptive_ctrl = AdaptiveController()
 correlation_engine = CorrelationEngine()
-energy_system = EnergySystem() # [NEW]
+energy_system = EnergySystem()
+behavior_engine = BehaviorEngine()
+memory_optimizer = MemoryOptimizer()
+context_compressor = ContextCompressor()
+scene_manager = SceneManager()
 
 async def summary_ticker(store: ContextStore):
     global server_ready
@@ -50,10 +56,12 @@ async def summary_ticker(store: ContextStore):
             chat_vel, energy_level = store.get_activity_metrics()
             new_threshold = adaptive_ctrl.update(chat_vel, energy_level)
             
-            # 3. Run Cross-Event Correlation
+            # 3. Update Scene
+            scene_manager.update_scene(store)
+            
+            # 4. Run Cross-Event Correlation
             patterns = correlation_engine.correlate(store)
             for pat in patterns:
-                print(f"🧩 [Correlation] {pat['text']}")
                 sys_event = store.add_event(
                     config.InputSource.SYSTEM_PATTERN, 
                     pat['text'], 
@@ -61,35 +69,97 @@ async def summary_ticker(store: ContextStore):
                     pat['score']
                 )
                 emit_event_scored(sys_event)
-                
-                # Check if pattern warrants Nami speaking? 
-                # Usually patterns are just context, but "Engagement Void" might need action.
-                # For now, we leave that to the "Interjection" logic below.
 
-            # 4. Gather all data for the "Director State" emission
-            summary_data = store.get_summary_data()
-            breadcrumbs_context = store.get_breadcrumbs(count=5)
+            # 5. Run Behavioral Systems
+            behavior_engine.update_goal(store)
             
+            thought_text = behavior_engine.check_curiosity(store)
+            if thought_text:
+                print(f"💡 [Curiosity] {thought_text}")
+                thought_event = store.add_event(
+                    config.InputSource.INTERNAL_THOUGHT,
+                    thought_text,
+                    {"type": "curiosity", "goal": behavior_engine.current_goal.name},
+                    EventScore(interestingness=0.6, conversational_value=0.9)
+                )
+                emit_event_scored(thought_event)
+                if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
+                     asyncio.create_task(llm_analyst.analyze_and_update_event(
+                        thought_event, store, profile_manager, handle_analysis_complete
+                    ))
+
+            callback_text = behavior_engine.check_callbacks(store)
+            if callback_text:
+                print(f"🕰️ [Callback] {callback_text}")
+                cb_event = store.add_event(
+                    config.InputSource.INTERNAL_THOUGHT,
+                    callback_text,
+                    {"type": "callback", "goal": "context_continuity"},
+                    EventScore(interestingness=0.7, conversational_value=0.8)
+                )
+                emit_event_scored(cb_event)
+                if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
+                     asyncio.create_task(llm_analyst.analyze_and_update_event(
+                        cb_event, store, profile_manager, handle_analysis_complete
+                    ))
+            
+            # 6. Memory & Compression
+            memory_optimizer.decay_memories(store)
+            await context_compressor.run_compression_cycle(store)
+
+            # 7. Gather Data & Emit
+            summary_data = store.get_summary_data()
+            active_topics = summary_data.get('topics', [])
+            smart_memories = memory_optimizer.retrieve_relevant_memories(store, active_topics)
+            
+            memories_list = [{
+                "source": m.source.name, 
+                "text": m.memory_text or m.text, 
+                "score": round(m.score.interestingness, 2), 
+                "type": "memory"
+            } for m in smart_memories]
+
+            # [FIX] Inject Narrative Log OR Fallback Summary
+            if store.narrative_log:
+                last_story = store.narrative_log[-1]
+                memories_list.insert(0, {
+                    "source": "NARRATIVE_HISTORY",
+                    "text": f"Previously: {last_story}",
+                    "score": 1.0,
+                    "type": "narrative"
+                })
+            elif not memories_list and summary_data['summary']:
+                # If absolutely nothing else is in memory, show the current summary
+                # so the panel doesn't look broken.
+                memories_list.append({
+                    "source": "WORKING_MEMORY",
+                    "text": f"Current Context: {summary_data['summary']}",
+                    "score": 0.5,
+                    "type": "working_memory"
+                })
+
             emit_director_state(
                 summary=summary_data['summary'],
                 raw_context=summary_data['raw_context'],
                 prediction=summary_data['prediction'],
                 mood=summary_data['mood'],
                 conversation_state=summary_data['conversation_state'],
-                flow_state=summary_data['flow'],      # [NEW]
-                user_intent=summary_data['intent'],   # [NEW]
-                active_user=breadcrumbs_context.get('active_user'),
-                memories=breadcrumbs_context.get('memories', []),
+                flow_state=summary_data['flow'],
+                user_intent=summary_data['intent'],
+                active_user=store.active_user_profile,
+                memories=memories_list,
                 adaptive_state={
                     "threshold": round(new_threshold, 2),
                     "state": adaptive_ctrl.state_label,
                     "chat_velocity": round(chat_vel, 1),
                     "energy": round(energy_level, 2),
-                    "social_battery": energy_system.get_status() # [NEW]
+                    "social_battery": energy_system.get_status(),
+                    "current_goal": behavior_engine.current_goal.name,
+                    "current_scene": summary_data['scene']
                 }
             )
 
-            # 5. Re-analyze one stale event
+            # 8. Stale Analysis
             stale_event = store.get_stale_event_for_analysis()
             if stale_event:
                 asyncio.create_task(llm_analyst.analyze_and_update_event(
@@ -124,14 +194,12 @@ async def serve_audio_effect(filename: str):
         return {"error": "Access denied"}
     return FileResponse(file_path, media_type="audio/wav")
 
-# --- Pydantic Models ---
 class EventPayload(BaseModel):
     source_str: str
     text: str
     metadata: Dict[str, Any] = {}
     username: Optional[str] = None
 
-# --- Emitters ---
 def _emit_threadsafe(event, data):
     global ui_event_loop, server_ready
     if not server_ready or ui_event_loop is None or ui_event_loop.is_closed():
@@ -155,8 +223,8 @@ def emit_director_state(summary, raw_context, prediction, mood, conversation_sta
         'prediction': prediction,
         'mood': mood,
         'conversation_state': conversation_state,
-        'flow': flow_state,       # [NEW]
-        'intent': user_intent,    # [NEW]
+        'flow': flow_state,
+        'intent': user_intent,
         'active_user': active_user,
         'memories': memories,
         'adaptive': adaptive_state or {}
@@ -174,21 +242,7 @@ def emit_event_scored(event: EventItem):
 
 def handle_analysis_complete(event: EventItem):
     emit_event_scored(event)
-    summary_data = store.get_summary_data()
-    breadcrumbs = store.get_breadcrumbs(count=5)
-    emit_director_state(
-        summary_data['summary'], 
-        summary_data['raw_context'], 
-        summary_data['prediction'],
-        summary_data['mood'], 
-        summary_data['conversation_state'],
-        summary_data['flow'],
-        summary_data['intent'],
-        breadcrumbs.get('active_user'), 
-        breadcrumbs.get('memories', [])
-    )
 
-# --- Socket.IO Handlers ---
 @sio.on("event")
 async def ingest_event(sid, payload: dict):
     try:
@@ -215,14 +269,11 @@ async def ingest_event(sid, payload: dict):
         zero_score = EventScore()
         store.add_event(source_enum, payload_model.text, payload_model.metadata, zero_score)
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
-        
-        # [ENERGY COST] Reply is cheap but not free
         energy_system.spend(config.ENERGY_COST_REPLY)
         return
     
     heuristic_score: EventScore = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
     event = store.add_event(source_enum, payload_model.text, payload_model.metadata, heuristic_score)
-    
     emit_event_scored(event)
     
     bundle_event_created = False
@@ -251,17 +302,7 @@ async def ingest_event(sid, payload: dict):
                 event, store, profile_manager, handle_analysis_complete
             ))
         elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
-             # [ENERGY CHECK] Can we afford this interjection?
              if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
-                 # We analyze first. If analysis confirms high score, THEN we interject.
-                 # The actual interjection HTTP call happens inside `llm_analyst.analyze_and_update_event` -> `trigger_nami_interjection`
-                 # We should pass the energy system to that flow or check here?
-                 # For simplicity: We check budget here. If we have budget, we ALLOW the analysis that MIGHT lead to interjection.
-                 # If it actually triggers, we spend the energy then.
-                 
-                 # Wait, `trigger_nami_interjection` is called inside `analyze_and_update_event`.
-                 # Let's modify `trigger_nami_interjection` to check/spend energy.
-                 # Ideally we pass energy_system dependency, but for now let's just allow the analysis.
                  asyncio.create_task(llm_analyst.analyze_and_update_event(
                     event, store, profile_manager, handle_analysis_complete
                 ))
@@ -274,7 +315,6 @@ async def receive_bot_reply(sid, payload: dict):
         payload.get('is_censored', False)
     )
 
-# --- HTTP Endpoints ---
 @app.get("/summary", response_class=PlainTextResponse)
 async def get_summary():
     summary, _ = store.get_summary()
@@ -282,7 +322,37 @@ async def get_summary():
 
 @app.get("/breadcrumbs")
 async def get_breadcrumbs(count: int = 3):
-    return store.get_breadcrumbs(count=count)
+    data = store.get_breadcrumbs(count)
+    summary_data = store.get_summary_data()
+    active_topics = summary_data.get('topics', [])
+    smart_memories = memory_optimizer.retrieve_relevant_memories(store, active_topics)
+    
+    data['memories'] = [{
+        "source": m.source.name, 
+        "text": m.memory_text or m.text, 
+        "score": round(m.score.interestingness, 2), 
+        "type": "memory"
+    } for m in smart_memories]
+    
+    if store.narrative_log:
+        last_story = store.narrative_log[-1]
+        data['memories'].insert(0, {
+            "source": "NARRATIVE_HISTORY",
+            "text": f"Previously: {last_story}",
+            "score": 1.0,
+            "type": "narrative"
+        })
+    elif summary_data['summary']:
+         data['memories'].insert(0, {
+            "source": "WORKING_MEMORY",
+            "text": f"Current Context: {summary_data['summary']}",
+            "score": 0.5,
+            "type": "working_memory"
+        })
+        
+    data['bot_goal'] = behavior_engine.current_goal.name
+    
+    return data
 
 @app.get("/summary_data")
 async def get_summary_data():
@@ -290,7 +360,6 @@ async def get_summary_data():
 
 app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
-# --- Server Lifecycle ---
 def open_browser():
     try: webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
     except: pass
