@@ -25,13 +25,13 @@ from memory_ops import MemoryOptimizer
 from context_compression import ContextCompressor
 from scene_manager import SceneManager
 from decision_engine import DecisionEngine
-# --- NEW IMPORT ---
 from prompt_constructor import PromptConstructor
 
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
 server_ready: bool = False
 
+# --- INIT ENGINES ---
 store = ContextStore()
 profile_manager = UserProfileManager()
 adaptive_ctrl = AdaptiveController()
@@ -42,7 +42,6 @@ memory_optimizer = MemoryOptimizer()
 context_compressor = ContextCompressor()
 scene_manager = SceneManager()
 decision_engine = DecisionEngine()
-# --- NEW INSTANCE ---
 prompt_constructor = PromptConstructor()
 
 async def summary_ticker(store: ContextStore):
@@ -84,7 +83,7 @@ async def summary_ticker(store: ContextStore):
             directive = decision_engine.generate_directive(
                 store, behavior_engine, adaptive_ctrl, energy_system
             )
-            store.set_directive(directive) # Store object directly
+            store.set_directive(directive)
             
             # 7. Curiosity & Callbacks
             thought_text = behavior_engine.check_curiosity(store, profile_manager)
@@ -332,20 +331,16 @@ async def get_summary():
     summary, _ = store.get_summary()
     return summary
 
-# --- UPDATE: Returns formatted prompt instead of raw dict list ---
+# --- UPDATE: Returns formatted prompt via PromptConstructor ---
 @app.get("/breadcrumbs")
 async def get_breadcrumbs(count: int = 3):
-    # Retrieve necessary data
     summary_data = store.get_summary_data()
     active_topics = summary_data.get('topics', [])
     
-    # 1. Get Memories
     smart_memories = memory_optimizer.retrieve_relevant_memories(store, active_topics)
-    
-    # 2. Get Directive (Object)
     directive_obj = summary_data.get('directive')
     
-    # 3. Construct Prompt
+    # This is the magic line that replaces all the old logic
     formatted_context = prompt_constructor.construct_context_block(
         store, 
         directive_obj,
@@ -357,7 +352,6 @@ async def get_breadcrumbs(count: int = 3):
 @app.get("/summary_data")
 async def get_summary_data():
     data = store.get_summary_data()
-    # Convert Directive object to dict for JSON response
     if data['directive']:
         data['directive'] = data['directive'].to_dict()
     return data
