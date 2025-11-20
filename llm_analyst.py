@@ -4,7 +4,8 @@ import json
 import httpx
 from config import (
     OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL, 
-    INTERJECTION_THRESHOLD, InputSource, MEMORY_THRESHOLD
+    INTERJECTION_THRESHOLD, InputSource, MEMORY_THRESHOLD,
+    ConversationState
 )
 from context_store import ContextStore, EventItem
 from user_profile_manager import UserProfileManager
@@ -35,7 +36,16 @@ async def close_http_client():
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""
     if username:
-        user_instruction = f"4. If the user '{username}' reveals a NEW permanent fact about themselves, extract it as a string."
+        # [UPDATED PROMPT] - Stricter Fact Extraction
+        user_instruction = (
+            f"4. Check if the user '{username}' explicitly states a NEW, CONCRETE fact about themselves "
+            f"(e.g., 'I own a cat', 'I work as a chef', 'I am from Ohio'). "
+            f"Extract ONLY the fact. \n"
+            f"   - REJECT general observations like '{username} is a user' or '{username} is new'.\n"
+            f"   - REJECT meta-descriptions like '{username} revealed a fact' or 'mentioned something'.\n"
+            f"   - REJECT usernames by themselves.\n"
+            f"   - If no concrete personal fact is stated, return an empty list."
+        )
 
     return f"""
 Analyze this streaming event: "{text}"
@@ -77,7 +87,6 @@ def parse_llm_response(response_text: str) -> Tuple[EventScore | None, str | Non
         
         scores_data = data.get("scores", {})
         
-        # Create EventScore object
         event_score = EventScore(
             interestingness=float(scores_data.get("interestingness", 0.0)),
             urgency=float(scores_data.get("urgency", 0.0)),
@@ -127,7 +136,6 @@ async def analyze_and_update_event(
         profile_updated = False
 
         if new_score:
-            # Check if significantly different from heuristic score
             if abs(new_score.interestingness - event.score.interestingness) > 0.1:
                 store.update_event_score(event.id, new_score)
                 event.score = new_score
@@ -146,8 +154,9 @@ async def analyze_and_update_event(
              store.update_mood(new_sentiment)
 
         if target_user and new_facts:
-            print(f"[Analyst] 📝 Found new facts for {target_user}: {new_facts}")
+            # Validation is now inside update_profile
             profile_manager.update_profile(target_user, {'new_facts': new_facts})
+            # Refresh active user display
             updated_profile = profile_manager.get_profile(target_user)
             store.set_active_user(updated_profile)
             profile_updated = True
@@ -164,7 +173,7 @@ async def trigger_nami_interjection(event: EventItem, urgency_score: float) -> b
     try:
         interject_payload = {
             "content": event.text,
-            "priority": 1.0 - urgency_score, # Convert score to priority (lower is better in funnel)
+            "priority": 1.0 - urgency_score,
             "source_info": {"source": f"DIRECTOR_{event.source.name}", "use_tts": True, **event.metadata}
         }
         response = await http_client.post(NAMI_INTERJECT_URL, json=interject_payload, timeout=2.0)
@@ -174,8 +183,6 @@ async def trigger_nami_interjection(event: EventItem, urgency_score: float) -> b
         return False
 
 def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
-    # Construct Layered Context String
-    
     def format_layer(events):
         lines = []
         for e in events:
@@ -183,7 +190,7 @@ def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
                 InputSource.MICROPHONE: "User", InputSource.DIRECT_MICROPHONE: "User",
                 InputSource.TWITCH_CHAT: "Twitch", InputSource.TWITCH_MENTION: "Twitch",
                 InputSource.BOT_TWITCH_REPLY: "Nami", InputSource.AMBIENT_AUDIO: "Audio",
-                InputSource.VISUAL_CHANGE: "Vision"
+                InputSource.VISUAL_CHANGE: "Vision", InputSource.SYSTEM_PATTERN: "Insight"
             }
             src = source_map.get(e.source, "Other")
             lines.append(f"- [{src}] {e.text}")
@@ -191,7 +198,7 @@ def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
 
     immediate_txt = format_layer(layers['immediate']) or "None"
     recent_txt = format_layer(layers['recent']) or "None"
-    background_txt = format_layer(layers['background'][-5:]) or "None" # Limit background to last 5 for now
+    background_txt = format_layer(layers['background'][-5:]) or "None" 
 
     prompt_context = f"""
 [IMMEDIATE EVENTS (Last 10s)]
@@ -203,13 +210,22 @@ def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
 [BACKGROUND CONTEXT (Earlier)]
 {background_txt}
 """
-        
+    
+    valid_states = ", ".join([s.name for s in ConversationState])
+    
     prompt = f"""
 You are a situation summarizer.
 {prompt_context}
 
 1. Summarize the CURRENT situation (1-2 sentences). Start with the 'vibe'.
 2. PREDICT user intent or next topic.
+3. Determine the Conversation State from this list: [{valid_states}]
+   - IDLE: Waiting/Quiet
+   - ENGAGED: Active chatting
+   - STORYTELLING: User telling story
+   - TEACHING: Explaining concepts
+   - FRUSTRATED: Struggling/Failing
+   - CELEBRATORY: Winning/Success
 
 Respond:
 [SUMMARY]
@@ -218,9 +234,8 @@ Respond:
 [PREDICTION]
 <text>
 
-[ANALYSIS]
-Topics: []
-Entities: []
+[STATE]
+<ONE_WORD_STATE>
 """
     return prompt_context, prompt
 
@@ -238,19 +253,33 @@ async def generate_summary(store: ContextStore):
         )
         full_response = response['message']['content'].strip()
         
-        # Basic parsing (same as before)
         summary_text = full_response
         prediction_text = "None"
+        new_state = None
         
         if "[SUMMARY]" in full_response:
             parts = full_response.split("[SUMMARY]")
             remaining = parts[1]
+            
             if "[PREDICTION]" in remaining:
                 sum_parts = remaining.split("[PREDICTION]")
                 summary_text = sum_parts[0].strip()
-                prediction_text = sum_parts[1].split("[ANALYSIS]")[0].strip()
+                remaining = sum_parts[1]
+                
+                if "[STATE]" in remaining:
+                    pred_parts = remaining.split("[STATE]")
+                    prediction_text = pred_parts[0].strip()
+                    state_str = pred_parts[1].strip().split('\n')[0].upper()
+                    
+                    try:
+                        state_str = state_str.replace('.', '').replace('"', '').strip()
+                        new_state = ConversationState[state_str]
+                    except KeyError:
+                        print(f"[Analyst] Unknown state returned: {state_str}")
 
         store.set_summary(summary_text, raw_context, [], [], prediction_text)
+        if new_state:
+            store.set_conversation_state(new_state)
         
     except Exception as e:
         print(f"[Analyst] Summary error: {e}")

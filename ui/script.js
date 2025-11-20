@@ -3,6 +3,8 @@ const socket = io("http://localhost:8002");
 // DOM Elements
 const moodPill = document.getElementById('mood-pill');
 const moodText = document.getElementById('mood-text');
+const statePill = document.getElementById('state-pill'); // [NEW]
+const stateText = document.getElementById('state-text'); // [NEW]
 const summaryEl = document.getElementById('summary-text');
 const summaryContextEl = document.getElementById('summary-raw-context');
 const predictionEl = document.getElementById('prediction-text');
@@ -10,11 +12,20 @@ const userContentEl = document.getElementById('user-content');
 const memoryListEl = document.getElementById('memory-list');
 const graphDataLogEl = document.getElementById('graph-data-log');
 
+// Adaptive Metrics Elements
+const adaptiveStateLabel = document.getElementById('adaptive-state-label');
+const thresholdBar = document.getElementById('threshold-bar');
+const thresholdVal = document.getElementById('threshold-value');
+const velocityBar = document.getElementById('velocity-bar');
+const velocityVal = document.getElementById('velocity-value');
+const energyBar = document.getElementById('energy-bar');
+const energyVal = document.getElementById('energy-value');
+
 // Context Logs
 const visionLog = [];
 const spokenLog = [];
 const audioLog = [];
-const graphLog = []; // Rolling log for scores
+const graphLog = []; 
 
 // Chart.js Setup
 const CHART_HISTORY_SIZE = 50;
@@ -60,10 +71,58 @@ socket.on('director_state', (data) => {
     moodText.textContent = mood;
     moodPill.className = `px-4 py-2 border-2 rounded-full font-bold text-lg flex items-center gap-2 mood-${mood}`;
     
+    // [NEW] Conversation State
+    const state = data.conversation_state || 'IDLE';
+    if (stateText) stateText.textContent = state;
+    
+    // Color code the state pill based on activity level
+    if (statePill) {
+        if (state === 'FRUSTRATED') statePill.className = "px-4 py-2 border-2 border-red-600 bg-red-900 rounded-full font-bold text-lg flex items-center gap-2 text-red-100";
+        else if (state === 'CELEBRATORY') statePill.className = "px-4 py-2 border-2 border-yellow-500 bg-yellow-900 rounded-full font-bold text-lg flex items-center gap-2 text-yellow-100";
+        else if (state === 'IDLE') statePill.className = "px-4 py-2 border-2 border-gray-600 bg-gray-800 rounded-full font-bold text-lg flex items-center gap-2 text-gray-400";
+        else statePill.className = "px-4 py-2 border-2 border-blue-500 bg-blue-900 rounded-full font-bold text-lg flex items-center gap-2 text-blue-100";
+    }
+
     // Summary & Prediction
     summaryEl.textContent = data.summary || 'No summary.';
     if(summaryContextEl) summaryContextEl.textContent = data.raw_context || '';
     predictionEl.textContent = data.prediction || 'Observing flow...';
+
+    // --- Adaptive Metrics Update ---
+    if (data.adaptive) {
+        const a = data.adaptive;
+        
+        // State Label
+        if (adaptiveStateLabel) {
+            adaptiveStateLabel.textContent = a.state || "Normal";
+            // Color code the state label
+            if (a.state.includes("Chaos")) adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-red-900 text-red-200";
+            else if (a.state.includes("Dead")) adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-blue-900 text-blue-200";
+            else adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-gray-700 text-gray-300";
+        }
+
+        // Threshold
+        if (thresholdBar) {
+            const tVal = a.threshold || 0.9;
+            thresholdBar.style.width = `${tVal * 100}%`;
+            thresholdVal.textContent = tVal.toFixed(2);
+        }
+
+        // Chat Velocity (Cap bar visually at 40 msgs/min for display purposes)
+        if (velocityBar) {
+            const vVal = a.chat_velocity || 0;
+            const vPct = Math.min((vVal / 40) * 100, 100); 
+            velocityBar.style.width = `${vPct}%`;
+            velocityVal.textContent = `${vVal.toFixed(1)} /m`;
+        }
+
+        // Energy
+        if (energyBar) {
+            const eVal = a.energy || 0;
+            energyBar.style.width = `${eVal * 100}%`;
+            energyVal.textContent = eVal.toFixed(2);
+        }
+    }
     
     // User
     if (data.active_user) {
@@ -154,12 +213,11 @@ socket.on('event_scored', (data) => {
         interestChart.update('none');
     }
     
-    // 2. Update Score Log (Restored)
-    const timestamp = new Date(data.timestamp * 1000).toLocaleTimeString();
+    // 2. Update Score Log
     const logLine = `${data.score.toFixed(2)} - ${data.source}: ${data.text.substring(0,30)}...`;
     graphLog.push(logLine);
     if(graphLog.length > 10) graphLog.shift();
-    graphDataLogEl.textContent = graphLog.join('\n');
+    if(graphDataLogEl) graphDataLogEl.textContent = graphLog.join('\n');
 });
 
 socket.on('twitch_message', (data) => {

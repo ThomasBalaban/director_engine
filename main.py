@@ -18,7 +18,6 @@ from context_store import ContextStore, EventItem
 from scoring import calculate_event_score, EventScore
 from user_profile_manager import UserProfileManager
 from adaptive_controller import AdaptiveController
-# [NEW IMPORT]
 from correlation_engine import CorrelationEngine
 
 # --- Global variables ---
@@ -30,7 +29,6 @@ server_ready: bool = False
 store = ContextStore()
 profile_manager = UserProfileManager()
 adaptive_ctrl = AdaptiveController()
-# [NEW SYSTEM]
 correlation_engine = CorrelationEngine()
 
 async def summary_ticker(store: ContextStore):
@@ -43,19 +41,16 @@ async def summary_ticker(store: ContextStore):
     
     while True:
         try:
-            # 1. Generate new summary/prediction
+            # 1. Generate new summary/prediction/STATE
             await llm_analyst.generate_summary(store)
             
             # 2. Update Adaptive Thresholds
             chat_vel, energy = store.get_activity_metrics()
             new_threshold = adaptive_ctrl.update(chat_vel, energy)
             
-            # 3. [NEW] Run Cross-Event Correlation
-            # Check for multi-modal patterns (Meme moments, Tilt, etc.)
+            # 3. Run Cross-Event Correlation
             patterns = correlation_engine.correlate(store)
-            
             for pat in patterns:
-                # Inject the pattern as a new System Event
                 print(f"🧩 [Correlation] {pat['text']}")
                 sys_event = store.add_event(
                     config.InputSource.SYSTEM_PATTERN, 
@@ -63,7 +58,6 @@ async def summary_ticker(store: ContextStore):
                     pat['metadata'], 
                     pat['score']
                 )
-                # Emit to UI immediately so we see the "Thought"
                 emit_event_scored(sys_event)
             
             # 4. Gather all data for the "Director State" emission
@@ -76,6 +70,7 @@ async def summary_ticker(store: ContextStore):
                 raw_context=summary_data['raw_context'],
                 prediction=summary_data['prediction'],
                 mood=summary_data['mood'],
+                conversation_state=summary_data['conversation_state'], # [NEW]
                 active_user=breadcrumbs_context.get('active_user'),
                 memories=breadcrumbs_context.get('memories', []),
                 adaptive_state={
@@ -145,12 +140,13 @@ def emit_audio_context(context): _emit_threadsafe('audio_context', {'context': c
 def emit_twitch_message(username, message): _emit_threadsafe('twitch_message', {'username': username, 'message': message})
 def emit_bot_reply(reply, prompt="", is_censored=False): _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
 
-def emit_director_state(summary, raw_context, prediction, mood, active_user, memories, adaptive_state=None):
+def emit_director_state(summary, raw_context, prediction, mood, conversation_state, active_user, memories, adaptive_state=None):
     _emit_threadsafe('director_state', {
         'summary': summary, 
         'raw_context': raw_context,
         'prediction': prediction,
         'mood': mood,
+        'conversation_state': conversation_state, # [NEW]
         'active_user': active_user,
         'memories': memories,
         'adaptive': adaptive_state or {}
@@ -167,7 +163,6 @@ def emit_event_scored(event: EventItem):
     })
 
 def handle_analysis_complete(event: EventItem):
-    """Callback: Updates UI when analysis finishes."""
     emit_event_scored(event)
     summary_data = store.get_summary_data()
     breadcrumbs = store.get_breadcrumbs(count=5)
@@ -176,6 +171,7 @@ def handle_analysis_complete(event: EventItem):
         summary_data['raw_context'], 
         summary_data['prediction'],
         summary_data['mood'], 
+        summary_data['conversation_state'], # [NEW]
         breadcrumbs.get('active_user'), 
         breadcrumbs.get('memories', [])
     )
@@ -190,7 +186,6 @@ async def ingest_event(sid, payload: dict):
         print(f"Invalid event payload: {e}")
         return
 
-    # 1. Instant UI Updates
     if source_enum == config.InputSource.VISUAL_CHANGE:
         emit_vision_context(payload_model.text)
     elif source_enum in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
@@ -200,7 +195,6 @@ async def ingest_event(sid, payload: dict):
     elif source_enum in [config.InputSource.TWITCH_CHAT, config.InputSource.TWITCH_MENTION]:
         emit_twitch_message(payload_model.username or "Chat", payload_model.text)
     
-    # 2. User Profile
     if payload_model.username:
         profile = profile_manager.get_profile(payload_model.username)
         store.set_active_user(profile)
@@ -211,17 +205,14 @@ async def ingest_event(sid, payload: dict):
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
         return
     
-    # 3. Scoring
     heuristic_score: EventScore = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
     event = store.add_event(source_enum, payload_model.text, payload_model.metadata, heuristic_score)
     
     emit_event_scored(event)
     
-    # 4. Analysis
     bundle_event_created = False
     primary_score = heuristic_score.interestingness
 
-    # Bundling logic
     if source_enum in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.6:
         store.set_pending_speech(event)
     elif source_enum not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.7:
@@ -257,7 +248,6 @@ async def receive_bot_reply(sid, payload: dict):
         payload.get('is_censored', False)
     )
 
-# --- HTTP Endpoints ---
 @app.get("/summary", response_class=PlainTextResponse)
 async def get_summary():
     summary, _ = store.get_summary()
@@ -273,7 +263,6 @@ async def get_summary_data():
 
 app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
-# --- Server Lifecycle ---
 def open_browser():
     try: webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
     except: pass
@@ -285,7 +274,6 @@ def run_server():
     ui_event_loop = loop
     print(f"✅ UI event loop captured: {id(ui_event_loop)}")
     
-    # Initialize Async Clients
     loop.run_until_complete(llm_analyst.create_http_client())
     
     summary_ticker_task = loop.create_task(summary_ticker(store))

@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple, Optional
 from config import (
     InputSource, PRIMARY_MEMORY_COUNT, DEFAULT_MOOD, MOOD_WINDOW_SIZE,
-    WINDOW_IMMEDIATE, WINDOW_RECENT, WINDOW_BACKGROUND
+    WINDOW_IMMEDIATE, WINDOW_RECENT, WINDOW_BACKGROUND,
+    ConversationState # [NEW IMPORT]
 )
 from scoring import EventScore
 import config
@@ -33,6 +34,9 @@ class ContextStore:
         
         self.pending_speech_event: Optional[EventItem] = None
         self.pending_speech_lock = threading.Lock()
+        
+        # --- STATE TRACKING ---
+        self.current_conversation_state = ConversationState.IDLE # [NEW]
         
         self.current_summary: str = "Just starting up."
         self.summary_raw_context: str = "Waiting for events..."
@@ -82,6 +86,13 @@ class ContextStore:
     def set_active_user(self, profile: Dict[str, Any]):
         with self.summary_lock:
             self.active_user_profile = profile
+
+    # [NEW METHOD]
+    def set_conversation_state(self, state: ConversationState):
+        with self.summary_lock:
+            if self.current_conversation_state != state:
+                print(f"🔄 State Transition: {self.current_conversation_state.name} -> {state.name}")
+                self.current_conversation_state = state
 
     def _manage_hierarchy_nolock(self):
         now = time.time()
@@ -141,6 +152,8 @@ class ContextStore:
                 "memories": long_term,
                 "prediction": self.current_prediction,
                 "current_mood": self.current_mood,
+                # [NEW] Include state in breadcrumbs so Nami knows
+                "conversation_state": self.current_conversation_state.name,
                 "active_user": self.active_user_profile
             }
 
@@ -204,7 +217,9 @@ class ContextStore:
                 "topics": self.current_topics,
                 "entities": self.current_entities,
                 "prediction": self.current_prediction,
-                "mood": self.current_mood
+                "mood": self.current_mood,
+                # [NEW]
+                "conversation_state": self.current_conversation_state.name
             }
 
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:
@@ -219,27 +234,17 @@ class ContextStore:
             if not candidates: return None
             return sorted(candidates, key=lambda e: e.timestamp, reverse=True)[0]
 
-    # --- NEW: Metrics for Adaptive Thresholds ---
     def get_activity_metrics(self) -> Tuple[float, float]:
-        """
-        Returns (chat_velocity, stream_energy)
-        chat_velocity: Approx events per minute based on recent window
-        stream_energy: Normalized 0.0-1.0 "hype" factor based on scores
-        """
         with self.lock:
             self._manage_hierarchy_nolock()
-            # Use Recent window (last 30s) for calculation
             events = self.recent
             if not events:
                 return 0.0, 0.0
 
-            # 1. Chat Velocity (Count of chat items * 2 for Per Minute approx since window is 30s)
             chat_items = [e for e in events if e.source in [InputSource.TWITCH_CHAT, InputSource.TWITCH_MENTION]]
             chat_velocity = len(chat_items) * 2.0
 
-            # 2. Stream Energy (Average interestingness of ALL non-chat events)
-            # or just high score density
             high_energy_items = [e for e in events if e.score.interestingness > 0.7]
-            stream_energy = min(len(high_energy_items) / 5.0, 1.0) # Cap at 1.0 if >5 crazy things happen in 30s
+            stream_energy = min(len(high_energy_items) / 5.0, 1.0) 
 
             return chat_velocity, stream_energy
