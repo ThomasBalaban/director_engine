@@ -20,13 +20,20 @@ const velocityBar = document.getElementById('velocity-bar');
 const velocityVal = document.getElementById('velocity-value');
 const energyBar = document.getElementById('energy-bar');
 const energyVal = document.getElementById('energy-value');
-// [NEW] Social Battery Elements
 const batteryBar = document.getElementById('battery-bar');
 const batteryVal = document.getElementById('battery-value');
 
-// [NEW] Dynamics Elements
+// Dynamics Elements
 const flowText = document.getElementById('flow-text');
 const intentText = document.getElementById('intent-text');
+
+// Directive Elements (The missing piece!)
+const dirObjectiveEl = document.getElementById('dir-objective');
+const dirToneEl = document.getElementById('dir-tone');
+const dirActionEl = document.getElementById('dir-action');
+const dirConstraintsBox = document.getElementById('dir-constraints-box');
+const dirConstraintsEl = document.getElementById('dir-constraints');
+
 
 // Context Logs
 const visionLog = [];
@@ -73,12 +80,12 @@ window.onload = initializeChart;
 
 // --- State Handlers ---
 socket.on('director_state', (data) => {
-    // Mood
+    // 1. Mood
     const mood = data.mood || 'Neutral';
-    moodText.textContent = mood;
-    moodPill.className = `px-4 py-2 border-2 rounded-full font-bold text-lg flex items-center gap-2 mood-${mood}`;
+    if (moodText) moodText.textContent = mood;
+    if (moodPill) moodPill.className = `px-4 py-2 border-2 rounded-full font-bold text-lg flex items-center gap-2 mood-${mood}`;
     
-    // Conversation State
+    // 2. Conversation State
     const state = data.conversation_state || 'IDLE';
     if (stateText) stateText.textContent = state;
     
@@ -89,16 +96,31 @@ socket.on('director_state', (data) => {
         else statePill.className = "px-4 py-2 border-2 border-blue-500 bg-blue-900 rounded-full font-bold text-lg flex items-center gap-2 text-blue-100";
     }
 
-    // [NEW] Dynamics (Flow & Intent)
+    // 3. Dynamics (Flow & Intent)
     if(flowText) flowText.textContent = data.flow || 'Unknown';
     if(intentText) intentText.textContent = data.intent || 'Unknown';
 
-    // Summary & Prediction
-    summaryEl.textContent = data.summary || 'No summary.';
+    // 4. Summary & Prediction
+    if(summaryEl) summaryEl.textContent = data.summary || 'No summary.';
     if(summaryContextEl) summaryContextEl.textContent = data.raw_context || '';
-    predictionEl.textContent = data.prediction || 'Observing flow...';
+    if(predictionEl) predictionEl.textContent = data.prediction || 'Observing flow...';
 
-    // --- Adaptive Metrics Update ---
+    // 5. --- NEW: Update Directive Panel ---
+    if (data.directive) {
+        const d = data.directive;
+        if(dirObjectiveEl) dirObjectiveEl.textContent = d.objective || "Waiting...";
+        if(dirToneEl) dirToneEl.textContent = d.tone || "Waiting...";
+        if(dirActionEl) dirActionEl.textContent = d.suggested_action || "Waiting...";
+
+        if (d.constraints && d.constraints.length > 0) {
+            if(dirConstraintsBox) dirConstraintsBox.classList.remove('hidden');
+            if(dirConstraintsEl) dirConstraintsEl.textContent = d.constraints.join(", ");
+        } else {
+            if(dirConstraintsBox) dirConstraintsBox.classList.add('hidden');
+        }
+    }
+
+    // 6. Adaptive Metrics Update
     if (data.adaptive) {
         const a = data.adaptive;
         
@@ -114,7 +136,7 @@ socket.on('director_state', (data) => {
         if (thresholdBar) {
             const tVal = a.threshold || 0.9;
             thresholdBar.style.width = `${tVal * 100}%`;
-            thresholdVal.textContent = tVal.toFixed(2);
+            if(thresholdVal) thresholdVal.textContent = tVal.toFixed(2);
         }
 
         // Chat Velocity
@@ -122,31 +144,30 @@ socket.on('director_state', (data) => {
             const vVal = a.chat_velocity || 0;
             const vPct = Math.min((vVal / 40) * 100, 100); 
             velocityBar.style.width = `${vPct}%`;
-            velocityVal.textContent = `${vVal.toFixed(1)} /m`;
+            if(velocityVal) velocityVal.textContent = `${vVal.toFixed(1)} /m`;
         }
 
         // Energy
         if (energyBar) {
             const eVal = a.energy || 0;
             energyBar.style.width = `${eVal * 100}%`;
-            energyVal.textContent = eVal.toFixed(2);
+            if(energyVal) energyVal.textContent = eVal.toFixed(2);
         }
 
-        // [NEW] Social Battery
+        // Social Battery
         if (a.social_battery && batteryBar) {
             const bat = a.social_battery;
             batteryBar.style.width = `${bat.percent}%`;
-            batteryVal.textContent = `${bat.percent}%`;
+            if(batteryVal) batteryVal.textContent = `${bat.percent}%`;
             
-            // Color coding based on charge
             if (bat.percent < 20) batteryBar.className = "h-full bg-red-500 transition-all duration-500";
             else if (bat.percent < 50) batteryBar.className = "h-full bg-yellow-500 transition-all duration-500";
             else batteryBar.className = "h-full bg-green-500 transition-all duration-500";
         }
     }
     
-    // User
-    if (data.active_user) {
+    // 7. User
+    if (data.active_user && userContentEl) {
         const u = data.active_user;
         userContentEl.innerHTML = `
             <div class="user-card">
@@ -164,20 +185,22 @@ socket.on('director_state', (data) => {
                 </div>
             </div>
         `;
-    } else {
+    } else if (userContentEl) {
         userContentEl.innerHTML = `<p class="text-gray-500 italic text-sm text-center mt-4">No active user context.</p>`;
     }
     
-    // Memories
-    if (data.memories && data.memories.length > 0) {
-        memoryListEl.innerHTML = data.memories.map(mem => `
-            <li class="border-l-2 border-purple-500 pl-3 bg-[#2a2a2a] p-2 rounded text-sm">
-                <div class="flex justify-between"><span class="text-purple-400 text-xs font-bold">${mem.source}</span> <span class="text-gray-500 text-xs">${mem.score}</span></div>
-                <div class="text-gray-300 leading-snug">${mem.text}</div>
-            </li>
-        `).join('');
-    } else {
-        memoryListEl.innerHTML = '<li class="text-gray-500 italic text-sm text-center mt-4">No high-impact memories yet.</li>';
+    // 8. Memories
+    if (memoryListEl) {
+        if (data.memories && data.memories.length > 0) {
+            memoryListEl.innerHTML = data.memories.map(mem => `
+                <li class="border-l-2 border-purple-500 pl-3 bg-[#2a2a2a] p-2 rounded text-sm">
+                    <div class="flex justify-between"><span class="text-purple-400 text-xs font-bold">${mem.source}</span> <span class="text-gray-500 text-xs">${mem.score}</span></div>
+                    <div class="text-gray-300 leading-snug">${mem.text}</div>
+                </li>
+            `).join('');
+        } else {
+            memoryListEl.innerHTML = '<li class="text-gray-500 italic text-sm text-center mt-4">No high-impact memories yet.</li>';
+        }
     }
 });
 

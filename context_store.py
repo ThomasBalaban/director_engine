@@ -51,8 +51,8 @@ class ContextStore:
         self.background: List[EventItem] = []
         
         # [REQ 10] Tiered History
-        self.narrative_log: List[str] = [] # Mid-term (last hour)
-        self.ancient_history_log: List[str] = [] # Long-term (compressed)
+        self.narrative_log: List[str] = [] 
+        self.ancient_history_log: List[str] = [] 
         
         self.all_memories: List[EventItem] = [] 
         self.lock = threading.Lock()
@@ -91,6 +91,9 @@ class ContextStore:
         self.current_topics: List[str] = []
         self.current_entities: List[str] = []
         self.current_prediction: str = "Observing flow..."
+        
+        # --- [NEW] DIRECTIVE ---
+        self.current_directive: Optional[Dict[str, Any]] = None
         
         self.active_user_profile: Optional[Dict[str, Any]] = None 
         
@@ -135,13 +138,13 @@ class ContextStore:
     def add_debt(self, text: str, topic: str = "general"):
         with self.lock:
             self.conversation_debt.append(DebtItem(text=text, timestamp=time.time(), topic=topic))
-            print(f"🧾 [Debt] Added: '{text}'")
+            print(f"📉 [Debt] Added: '{text}'")
 
     def resolve_debt(self, topic: str = None) -> Optional[DebtItem]:
         with self.lock:
             if self.conversation_debt:
                 item = self.conversation_debt.pop(0)
-                print(f"🧾 [Debt] Resolved: '{item.text}'")
+                print(f"✅ [Debt] Resolved: '{item.text}'")
                 return item
         return None
     
@@ -149,13 +152,13 @@ class ContextStore:
         with self.lock:
             self.narrative_log.append(text)
             # Allow it to grow to triggers compression externally
-            print(f"📜 [Context] Added narrative segment: {text[:50]}...")
+            print(f"📖 [Context] Added narrative segment: {text[:50]}...")
 
     # --- [REQ 10] Ancient History ---
     def archive_ancient_history(self, summary_text: str):
         with self.lock:
             self.ancient_history_log.append(summary_text)
-            print(f"🏛️ [History] Archived ancient block: {summary_text[:50]}...")
+            print(f"📜 [History] Archived ancient block: {summary_text[:50]}...")
 
     def promote_to_memory(self, event: EventItem, summary_text: str = None):
         with self.lock:
@@ -205,6 +208,11 @@ class ContextStore:
             if self.current_scene != scene:
                 print(f"🎬 Scene Change: {self.current_scene.name} -> {scene.name}")
                 self.current_scene = scene
+    
+    # --- [NEW] Set Directive ---
+    def set_directive(self, directive: Dict[str, Any]):
+        with self.summary_lock:
+            self.current_directive = directive
 
     def _manage_hierarchy_nolock(self):
         now = time.time()
@@ -259,7 +267,9 @@ class ContextStore:
                 "active_user": self.active_user_profile,
                 "flow_state": self.current_flow.name,
                 "user_intent": self.current_intent.name,
-                "scene": self.current_scene.name
+                "scene": self.current_scene.name,
+                # --- NEW: Expose Directive ---
+                "directive": self.current_directive 
             }
 
     def update_event_score(self, event_id: str, new_score: EventScore) -> bool:
@@ -326,7 +336,8 @@ class ContextStore:
                 "conversation_state": self.current_conversation_state.name,
                 "flow": self.current_flow.name,
                 "intent": self.current_intent.name,
-                "scene": self.current_scene.name
+                "scene": self.current_scene.name,
+                "directive": self.current_directive
             }
 
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:

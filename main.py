@@ -24,6 +24,9 @@ from behavior_engine import BehaviorEngine
 from memory_ops import MemoryOptimizer
 from context_compression import ContextCompressor
 from scene_manager import SceneManager
+from decision_engine import DecisionEngine
+# --- NEW IMPORT ---
+from prompt_constructor import PromptConstructor
 
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
@@ -38,6 +41,9 @@ behavior_engine = BehaviorEngine()
 memory_optimizer = MemoryOptimizer()
 context_compressor = ContextCompressor()
 scene_manager = SceneManager()
+decision_engine = DecisionEngine()
+# --- NEW INSTANCE ---
+prompt_constructor = PromptConstructor()
 
 async def summary_ticker(store: ContextStore):
     global server_ready
@@ -52,10 +58,10 @@ async def summary_ticker(store: ContextStore):
             # 1. Generate new summary/prediction/state
             await llm_analyst.generate_summary(store)
             
-            # 2. Update Adaptive Thresholds & RL [REQ 6]
+            # 2. Update Adaptive Thresholds & RL
             chat_vel, energy_level = store.get_activity_metrics()
             new_threshold = adaptive_ctrl.update(chat_vel, energy_level)
-            adaptive_ctrl.process_feedback(store) # <--- CRITICAL RL HOOK
+            adaptive_ctrl.process_feedback(store) 
             
             # 3. Update Scene
             scene_manager.update_scene(store)
@@ -74,7 +80,13 @@ async def summary_ticker(store: ContextStore):
             # 5. Run Behavioral Systems
             behavior_engine.update_goal(store)
             
-            # [REQ 7] Curiosity now uses profile_manager for proactive topics
+            # 6. Generate Directive
+            directive = decision_engine.generate_directive(
+                store, behavior_engine, adaptive_ctrl, energy_system
+            )
+            store.set_directive(directive) # Store object directly
+            
+            # 7. Curiosity & Callbacks
             thought_text = behavior_engine.check_curiosity(store, profile_manager)
             if thought_text:
                 print(f"💡 [Curiosity] {thought_text}")
@@ -105,11 +117,11 @@ async def summary_ticker(store: ContextStore):
                         cb_event, store, profile_manager, handle_analysis_complete
                     ))
             
-            # 6. Memory & Compression
+            # 8. Memory & Compression
             memory_optimizer.decay_memories(store)
             await context_compressor.run_compression_cycle(store)
 
-            # 7. Gather Data & Emit
+            # 9. Gather Data for UI
             summary_data = store.get_summary_data()
             active_topics = summary_data.get('topics', [])
             smart_memories = memory_optimizer.retrieve_relevant_memories(store, active_topics)
@@ -121,24 +133,15 @@ async def summary_ticker(store: ContextStore):
                 "type": "memory"
             } for m in smart_memories]
 
-            # Inject Narrative Log OR Fallback Summary
             if store.narrative_log:
                 recent_history = list(reversed(store.narrative_log[-3:]))
-                
                 for i, story in enumerate(recent_history):
                     memories_list.insert(i, {
                         "source": "NARRATIVE_HISTORY",
                         "text": f"Previously: {story}",
-                        "score": 1.0, # Always show at top
+                        "score": 1.0, 
                         "type": "narrative"
                     })
-            elif not memories_list and summary_data['summary']:
-                memories_list.append({
-                    "source": "WORKING_MEMORY",
-                    "text": f"Current Context: {summary_data['summary']}",
-                    "score": 0.5,
-                    "type": "working_memory"
-                })
 
             emit_director_state(
                 summary=summary_data['summary'],
@@ -150,6 +153,7 @@ async def summary_ticker(store: ContextStore):
                 user_intent=summary_data['intent'],
                 active_user=store.active_user_profile,
                 memories=memories_list,
+                directive=summary_data['directive'].to_dict() if summary_data['directive'] else None,
                 adaptive_state={
                     "threshold": round(new_threshold, 2),
                     "state": adaptive_ctrl.state_label,
@@ -161,7 +165,7 @@ async def summary_ticker(store: ContextStore):
                 }
             )
 
-            # 8. Stale Analysis
+            # 10. Stale Analysis
             stale_event = store.get_stale_event_for_analysis()
             if stale_event:
                 asyncio.create_task(llm_analyst.analyze_and_update_event(
@@ -218,7 +222,7 @@ def emit_audio_context(context): _emit_threadsafe('audio_context', {'context': c
 def emit_twitch_message(username, message): _emit_threadsafe('twitch_message', {'username': username, 'message': message})
 def emit_bot_reply(reply, prompt="", is_censored=False): _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
 
-def emit_director_state(summary, raw_context, prediction, mood, conversation_state, flow_state, user_intent, active_user, memories, adaptive_state=None):
+def emit_director_state(summary, raw_context, prediction, mood, conversation_state, flow_state, user_intent, active_user, memories, directive, adaptive_state=None):
     _emit_threadsafe('director_state', {
         'summary': summary, 
         'raw_context': raw_context,
@@ -229,6 +233,7 @@ def emit_director_state(summary, raw_context, prediction, mood, conversation_sta
         'intent': user_intent,
         'active_user': active_user,
         'memories': memories,
+        'directive': directive, 
         'adaptive': adaptive_state or {}
     })
 
@@ -271,10 +276,7 @@ async def ingest_event(sid, payload: dict):
         zero_score = EventScore()
         store.add_event(source_enum, payload_model.text, payload_model.metadata, zero_score)
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
-        
-        # Register debt for questions asked
         behavior_engine.register_bot_action(store, payload_model.text)
-        
         energy_system.spend(config.ENERGY_COST_REPLY)
         return
     
@@ -282,7 +284,6 @@ async def ingest_event(sid, payload: dict):
     event = store.add_event(source_enum, payload_model.text, payload_model.metadata, heuristic_score)
     emit_event_scored(event)
     
-    # Check for debt resolution
     if source_enum in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
          behavior_engine.check_debt_resolution(store, payload_model.text)
 
@@ -300,18 +301,13 @@ async def ingest_event(sid, payload: dict):
             bundle_score = EventScore(interestingness=1.0, urgency=0.9, conversational_value=1.0, topic_relevance=1.0)
             bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, bundle_score)
             emit_event_scored(bundle_event)
-            
-            # Bundles always bypass attention locks because they are high-context user interactions
             asyncio.create_task(llm_analyst.analyze_and_update_event(
                 bundle_event, store, profile_manager, handle_analysis_complete
             ))
             bundle_event_created = True
 
     if not bundle_event_created:
-        # ATTENTION COMPETITION LOGIC
-        # We ask the behavior engine: "Does this event deserve attention right now?"
         attended_event = behavior_engine.direct_attention(store, [event])
-        
         if attended_event:
             if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
                 asyncio.create_task(llm_analyst.analyze_and_update_event(
@@ -322,8 +318,6 @@ async def ingest_event(sid, payload: dict):
                      asyncio.create_task(llm_analyst.analyze_and_update_event(
                         event, store, profile_manager, handle_analysis_complete
                     ))
-        else:
-            print(f"🛡️ [Attention] Blocked low-priority event: {event.source.name} (Score: {primary_score:.2f})")
 
 @sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
@@ -338,43 +332,35 @@ async def get_summary():
     summary, _ = store.get_summary()
     return summary
 
+# --- UPDATE: Returns formatted prompt instead of raw dict list ---
 @app.get("/breadcrumbs")
 async def get_breadcrumbs(count: int = 3):
-    data = store.get_breadcrumbs(count)
+    # Retrieve necessary data
     summary_data = store.get_summary_data()
     active_topics = summary_data.get('topics', [])
+    
+    # 1. Get Memories
     smart_memories = memory_optimizer.retrieve_relevant_memories(store, active_topics)
     
-    data['memories'] = [{
-        "source": m.source.name, 
-        "text": m.memory_text or m.text, 
-        "score": round(m.score.interestingness, 2), 
-        "type": "memory"
-    } for m in smart_memories]
+    # 2. Get Directive (Object)
+    directive_obj = summary_data.get('directive')
     
-    if store.narrative_log:
-        last_story = store.narrative_log[-1]
-        data['memories'].insert(0, {
-            "source": "NARRATIVE_HISTORY",
-            "text": f"Previously: {last_story}",
-            "score": 1.0,
-            "type": "narrative"
-        })
-    elif summary_data['summary']:
-         data['memories'].insert(0, {
-            "source": "WORKING_MEMORY",
-            "text": f"Current Context: {summary_data['summary']}",
-            "score": 0.5,
-            "type": "working_memory"
-        })
-        
-    data['bot_goal'] = behavior_engine.current_goal.name
+    # 3. Construct Prompt
+    formatted_context = prompt_constructor.construct_context_block(
+        store, 
+        directive_obj,
+        smart_memories
+    )
     
-    return data
+    return {"formatted_context": formatted_context}
 
 @app.get("/summary_data")
 async def get_summary_data():
-    return store.get_summary_data()
+    data = store.get_summary_data()
+    # Convert Directive object to dict for JSON response
+    if data['directive']:
+        data['directive'] = data['directive'].to_dict()
+    return data
 
 app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
