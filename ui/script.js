@@ -3,8 +3,8 @@ const socket = io("http://localhost:8002");
 // DOM Elements
 const moodPill = document.getElementById('mood-pill');
 const moodText = document.getElementById('mood-text');
-const statePill = document.getElementById('state-pill'); // [NEW]
-const stateText = document.getElementById('state-text'); // [NEW]
+const statePill = document.getElementById('state-pill');
+const stateText = document.getElementById('state-text');
 const summaryEl = document.getElementById('summary-text');
 const summaryContextEl = document.getElementById('summary-raw-context');
 const predictionEl = document.getElementById('prediction-text');
@@ -20,6 +20,13 @@ const velocityBar = document.getElementById('velocity-bar');
 const velocityVal = document.getElementById('velocity-value');
 const energyBar = document.getElementById('energy-bar');
 const energyVal = document.getElementById('energy-value');
+// [NEW] Social Battery Elements
+const batteryBar = document.getElementById('battery-bar');
+const batteryVal = document.getElementById('battery-value');
+
+// [NEW] Dynamics Elements
+const flowText = document.getElementById('flow-text');
+const intentText = document.getElementById('intent-text');
 
 // Context Logs
 const visionLog = [];
@@ -71,17 +78,20 @@ socket.on('director_state', (data) => {
     moodText.textContent = mood;
     moodPill.className = `px-4 py-2 border-2 rounded-full font-bold text-lg flex items-center gap-2 mood-${mood}`;
     
-    // [NEW] Conversation State
+    // Conversation State
     const state = data.conversation_state || 'IDLE';
     if (stateText) stateText.textContent = state;
     
-    // Color code the state pill based on activity level
     if (statePill) {
         if (state === 'FRUSTRATED') statePill.className = "px-4 py-2 border-2 border-red-600 bg-red-900 rounded-full font-bold text-lg flex items-center gap-2 text-red-100";
         else if (state === 'CELEBRATORY') statePill.className = "px-4 py-2 border-2 border-yellow-500 bg-yellow-900 rounded-full font-bold text-lg flex items-center gap-2 text-yellow-100";
         else if (state === 'IDLE') statePill.className = "px-4 py-2 border-2 border-gray-600 bg-gray-800 rounded-full font-bold text-lg flex items-center gap-2 text-gray-400";
         else statePill.className = "px-4 py-2 border-2 border-blue-500 bg-blue-900 rounded-full font-bold text-lg flex items-center gap-2 text-blue-100";
     }
+
+    // [NEW] Dynamics (Flow & Intent)
+    if(flowText) flowText.textContent = data.flow || 'Unknown';
+    if(intentText) intentText.textContent = data.intent || 'Unknown';
 
     // Summary & Prediction
     summaryEl.textContent = data.summary || 'No summary.';
@@ -95,7 +105,6 @@ socket.on('director_state', (data) => {
         // State Label
         if (adaptiveStateLabel) {
             adaptiveStateLabel.textContent = a.state || "Normal";
-            // Color code the state label
             if (a.state.includes("Chaos")) adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-red-900 text-red-200";
             else if (a.state.includes("Dead")) adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-blue-900 text-blue-200";
             else adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-gray-700 text-gray-300";
@@ -108,7 +117,7 @@ socket.on('director_state', (data) => {
             thresholdVal.textContent = tVal.toFixed(2);
         }
 
-        // Chat Velocity (Cap bar visually at 40 msgs/min for display purposes)
+        // Chat Velocity
         if (velocityBar) {
             const vVal = a.chat_velocity || 0;
             const vPct = Math.min((vVal / 40) * 100, 100); 
@@ -121,6 +130,18 @@ socket.on('director_state', (data) => {
             const eVal = a.energy || 0;
             energyBar.style.width = `${eVal * 100}%`;
             energyVal.textContent = eVal.toFixed(2);
+        }
+
+        // [NEW] Social Battery
+        if (a.social_battery && batteryBar) {
+            const bat = a.social_battery;
+            batteryBar.style.width = `${bat.percent}%`;
+            batteryVal.textContent = `${bat.percent}%`;
+            
+            // Color coding based on charge
+            if (bat.percent < 20) batteryBar.className = "h-full bg-red-500 transition-all duration-500";
+            else if (bat.percent < 50) batteryBar.className = "h-full bg-yellow-500 transition-all duration-500";
+            else batteryBar.className = "h-full bg-green-500 transition-all duration-500";
         }
     }
     
@@ -240,7 +261,6 @@ socket.on('bot_reply', (data) => {
     const censorshipClass = isCensored ? 'censored-reply' : '';
     const censorshipIndicator = isCensored ? '<span class="censored-indicator">🚨 FILTERED</span>' : '';
 
-    // 1. Add to Nami Panel (Brain 2)
     const namiHTML = `<div class="log-line nami-reply cursor-pointer ${censorshipClass}" onclick="openDrawer(this)" 
         data-reply="${encodeURIComponent(data.reply)}" data-sent="${encodeURIComponent(data.prompt)}" data-censored="${isCensored}">
         <strong>Nami:</strong> ${sanitizedReply}${censorshipIndicator}
@@ -248,7 +268,6 @@ socket.on('bot_reply', (data) => {
     
     appendLog(document.getElementById('nami-replies'), namiHTML);
 
-    // 2. Add to Twitch Chat Panel
     const chatHTML = `
         <div class="log-line" style="background-color: rgba(99, 226, 183, 0.05);">
             <span class="twitch-user" style="color: #63e2b7;">Nami:</span> 
@@ -258,7 +277,6 @@ socket.on('bot_reply', (data) => {
     appendLog(document.getElementById('twitch-messages'), chatHTML);
 });
 
-// --- Drawer Logic ---
 window.openDrawer = function(el) {
     const sent = decodeURIComponent(el.getAttribute('data-sent'));
     const replyRaw = decodeURIComponent(el.getAttribute('data-reply'));
