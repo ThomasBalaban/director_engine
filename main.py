@@ -15,7 +15,8 @@ import socketio # type: ignore
 import config
 import llm_analyst
 from context_store import ContextStore, EventItem
-from scoring import calculate_event_score
+# [UPDATED IMPORTS]
+from scoring import calculate_event_score, EventScore
 from user_profile_manager import UserProfileManager
 
 # --- Global variables ---
@@ -124,9 +125,11 @@ def emit_director_state(summary, raw_context, prediction, mood, active_user, mem
         'memories': memories
     })
 
+# [UPDATED] to handle EventScore object
 def emit_event_scored(event: EventItem):
     _emit_threadsafe('event_scored', {
-        'score': event.score,
+        'score': event.score.interestingness, # Primary metric for graph
+        'scores': event.score.to_dict(),      # Full detail for inspection
         'timestamp': event.timestamp,
         'text': event.text,
         'source': event.source.name,
@@ -174,30 +177,37 @@ async def ingest_event(sid, payload: dict):
         store.set_active_user(profile)
 
     if source_enum == config.InputSource.BOT_TWITCH_REPLY:
-        store.add_event(source_enum, payload_model.text, payload_model.metadata, 0.0)
+        # Create dummy zero score
+        zero_score = EventScore()
+        store.add_event(source_enum, payload_model.text, payload_model.metadata, zero_score)
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
         return
     
-    # 3. Scoring
-    sieve_score = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
-    event = store.add_event(source_enum, payload_model.text, payload_model.metadata, sieve_score)
+    # 3. Scoring [UPDATED for Multi-Dimensional Scoring]
+    heuristic_score: EventScore = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
+    event = store.add_event(source_enum, payload_model.text, payload_model.metadata, heuristic_score)
     
     emit_event_scored(event)
     
     # 4. Analysis (Fire and Forget - No Await!)
     bundle_event_created = False
     
+    # Use Interestingness as the primary "Sieve" metric
+    primary_score = heuristic_score.interestingness
+
     # Bundling logic
-    if source_enum in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and sieve_score >= 0.6:
+    if source_enum in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.6:
         store.set_pending_speech(event)
     
-    elif source_enum not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and sieve_score >= 0.7:
+    elif source_enum not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.7:
         pending_speech = store.get_and_clear_pending_speech(max_age_seconds=3.0)
         if pending_speech:
             print(f"✅ EVENT BUNDLE: {pending_speech.text} + {event.text}")
             bundle_text = f"User reacted with '{pending_speech.text}' to: '{event.text}'"
             bundle_metadata = {**event.metadata, "is_bundle": True, "speech_text": pending_speech.text, "event_text": event.text}
-            bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, 1.0)
+            # Give bundles max scores
+            bundle_score = EventScore(interestingness=1.0, urgency=0.9, conversational_value=1.0, topic_relevance=1.0)
+            bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, bundle_score)
             emit_event_scored(bundle_event)
             
             # Async Task
@@ -207,13 +217,16 @@ async def ingest_event(sid, payload: dict):
             bundle_event_created = True
 
     if not bundle_event_created:
-        if sieve_score >= config.OLLAMA_TRIGGER_THRESHOLD:
+        if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
             # Async Task
             asyncio.create_task(llm_analyst.analyze_and_update_event(
                 event, store, profile_manager, handle_analysis_complete
             ))
-        elif sieve_score >= config.INTERJECTION_THRESHOLD:
-             asyncio.create_task(llm_analyst.trigger_nami_interjection(event, sieve_score))
+        elif heuristic_score.urgency >= config.INTERJECTION_THRESHOLD:
+             # Check high urgency items even if low interestingness
+             asyncio.create_task(llm_analyst.analyze_and_update_event(
+                event, store, profile_manager, handle_analysis_complete
+            ))
 
 @sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):

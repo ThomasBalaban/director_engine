@@ -4,8 +4,12 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple, Optional
-from config import CONTEXT_TIME_WINDOW_SECONDS, InputSource, PRIMARY_MEMORY_COUNT, DEFAULT_MOOD, MOOD_WINDOW_SIZE
-import config 
+from config import (
+    InputSource, PRIMARY_MEMORY_COUNT, DEFAULT_MOOD, MOOD_WINDOW_SIZE,
+    WINDOW_IMMEDIATE, WINDOW_RECENT, WINDOW_BACKGROUND
+)
+from scoring import EventScore
+import config
 
 @dataclass
 class EventItem:
@@ -13,13 +17,17 @@ class EventItem:
     source: InputSource
     text: str
     metadata: Dict[str, Any]
-    score: float
+    score: EventScore 
     memory_text: Optional[str] = None 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 class ContextStore:
     def __init__(self):
-        self.events: List[EventItem] = [] 
+        # --- HIERARCHICAL STORAGE ---
+        self.immediate: List[EventItem] = []   # < 10s
+        self.recent: List[EventItem] = []      # 10s - 30s
+        self.background: List[EventItem] = []  # 30s - 5m
+        
         self.all_memories: List[EventItem] = [] 
         self.lock = threading.Lock()
         
@@ -32,19 +40,19 @@ class ContextStore:
         self.current_entities: List[str] = []
         self.current_prediction: str = "Observing flow..."
         
-        # --- MOOD & PROFILE STATE ---
         self.current_mood: str = DEFAULT_MOOD
         self.sentiment_history: List[str] = [] 
         self.active_user_profile: Optional[Dict[str, Any]] = None 
         
         self.summary_lock = threading.Lock()
 
-    def add_event(self, source: InputSource, text: str, metadata: Dict[str, Any], score: float) -> EventItem:
+    def add_event(self, source: InputSource, text: str, metadata: Dict[str, Any], score: EventScore) -> EventItem:
         now = time.time()
         item = EventItem(timestamp=now, source=source, text=text, metadata=metadata, score=score)
         with self.lock:
-            self.events.append(item)
-            self._prune_events_nolock() 
+            # All new events enter the Immediate layer
+            self.immediate.append(item)
+            self._manage_hierarchy_nolock() 
         return item
     
     def promote_to_memory(self, event: EventItem, summary_text: str = None):
@@ -76,19 +84,62 @@ class ContextStore:
         with self.summary_lock:
             self.active_user_profile = profile
 
-    def _prune_events_nolock(self):
+    def _manage_hierarchy_nolock(self):
+        """
+        Moves events between layers based on age.
+        Immediate -> Recent -> Background -> Deleted
+        """
         now = time.time()
-        cutoff_time = now - CONTEXT_TIME_WINDOW_SECONDS
-        self.events = [e for e in self.events if e.timestamp >= cutoff_time]
+        
+        # 1. Move Immediate -> Recent
+        to_move_recent = []
+        keep_immediate = []
+        for e in self.immediate:
+            age = now - e.timestamp
+            if age > WINDOW_IMMEDIATE:
+                to_move_recent.append(e)
+            else:
+                keep_immediate.append(e)
+        self.immediate = keep_immediate
+        self.recent.extend(to_move_recent)
+
+        # 2. Move Recent -> Background
+        to_move_background = []
+        keep_recent = []
+        for e in self.recent:
+            age = now - e.timestamp
+            if age > WINDOW_RECENT:
+                to_move_background.append(e)
+            else:
+                keep_recent.append(e)
+        self.recent = keep_recent
+        self.background.extend(to_move_background)
+
+        # 3. Prune Background
+        self.background = [e for e in self.background if (now - e.timestamp) <= WINDOW_BACKGROUND]
 
     def get_breadcrumbs(self, count: int = 3) -> Dict[str, Any]:
         with self.lock:
-            self._prune_events_nolock()
-            sorted_events = sorted(self.events, key=lambda e: e.score, reverse=True)
-            short_term = [{"source": e.source.name, "text": e.text, "score": round(e.score, 2), "type": "recent"} for e in sorted_events[:count]]
-            sorted_memories = sorted(self.all_memories, key=lambda e: e.score, reverse=True)
+            self._manage_hierarchy_nolock()
+            # Flatten immediate + recent for the "short term" breadcrumbs
+            active_events = self.immediate + self.recent
+            sorted_events = sorted(active_events, key=lambda e: e.score.interestingness, reverse=True)
+            
+            short_term = [{
+                "source": e.source.name, 
+                "text": e.text, 
+                "score": round(e.score.interestingness, 2), 
+                "type": "recent"
+            } for e in sorted_events[:count]]
+
+            sorted_memories = sorted(self.all_memories, key=lambda e: e.score.interestingness, reverse=True)
             primary_memories_list = sorted_memories[:PRIMARY_MEMORY_COUNT]
-            long_term = [{"source": m.source.name, "text": m.memory_text or m.text, "score": round(m.score, 2), "type": "memory"} for m in primary_memories_list]
+            long_term = [{
+                "source": m.source.name, 
+                "text": m.memory_text or m.text, 
+                "score": round(m.score.interestingness, 2), 
+                "type": "memory"
+            } for m in primary_memories_list]
 
         with self.summary_lock:
             return {
@@ -99,20 +150,23 @@ class ContextStore:
                 "active_user": self.active_user_profile
             }
 
-    def update_event_score(self, event_id: str, new_score: float) -> bool:
+    def update_event_score(self, event_id: str, new_score: EventScore) -> bool:
         with self.lock:
-            for event in self.events:
-                if event.id == event_id:
-                    event.score = new_score
-                    return True
+            # Search all layers
+            for layer in [self.immediate, self.recent, self.background]:
+                for event in layer:
+                    if event.id == event_id:
+                        event.score = new_score
+                        return True
         return False
 
     def update_event_metadata(self, event_id: str, metadata_update: Dict[str, Any]) -> bool:
         with self.lock:
-            for event in self.events:
-                if event.id == event_id:
-                    event.metadata.update(metadata_update)
-                    return True
+            for layer in [self.immediate, self.recent, self.background]:
+                for event in layer:
+                    if event.id == event_id:
+                        event.metadata.update(metadata_update)
+                        return True
         return False
 
     def set_pending_speech(self, event: EventItem):
@@ -140,10 +194,15 @@ class ContextStore:
             self.current_entities = entities
             self.current_prediction = prediction
             
-    def get_all_events_for_summary(self) -> List[EventItem]:
+    def get_all_events_for_summary(self) -> Dict[str, List[EventItem]]:
+        """Returns a dictionary of layers for the summarizer"""
         with self.lock:
-            self._prune_events_nolock()
-            return sorted(self.events, key=lambda e: e.timestamp)
+            self._manage_hierarchy_nolock()
+            return {
+                "immediate": list(self.immediate),
+                "recent": list(self.recent),
+                "background": list(self.background)
+            }
 
     def get_summary_data(self) -> Dict[str, Any]:
         with self.summary_lock:
@@ -158,7 +217,13 @@ class ContextStore:
 
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:
         with self.lock:
-            self._prune_events_nolock()
-            candidates = [e for e in self.events if 0.3 < e.score < config.OLLAMA_TRIGGER_THRESHOLD and "sentiment" not in e.metadata and "is_bundle" not in e.metadata]
+            self._manage_hierarchy_nolock()
+            # We probably only want to analyze immediate or recent items that missed the initial analysis
+            candidates = [
+                e for e in self.immediate + self.recent 
+                if 0.3 < e.score.interestingness < config.OLLAMA_TRIGGER_THRESHOLD 
+                and "sentiment" not in e.metadata 
+                and "is_bundle" not in e.metadata
+            ]
             if not candidates: return None
             return sorted(candidates, key=lambda e: e.timestamp, reverse=True)[0]
