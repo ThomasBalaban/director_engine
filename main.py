@@ -15,9 +15,10 @@ import socketio # type: ignore
 import config
 import llm_analyst
 from context_store import ContextStore, EventItem
-# [UPDATED IMPORTS]
 from scoring import calculate_event_score, EventScore
 from user_profile_manager import UserProfileManager
+# [NEW IMPORT]
+from adaptive_controller import AdaptiveController
 
 # --- Global variables ---
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -27,6 +28,8 @@ server_ready: bool = False
 # Initialize Core Systems
 store = ContextStore()
 profile_manager = UserProfileManager()
+# [NEW SYSTEM]
+adaptive_ctrl = AdaptiveController()
 
 async def summary_ticker(store: ContextStore):
     global server_ready
@@ -41,6 +44,10 @@ async def summary_ticker(store: ContextStore):
             # 1. Generate new summary/prediction
             await llm_analyst.generate_summary(store)
             
+            # 2. [NEW] Update Adaptive Thresholds
+            chat_vel, energy = store.get_activity_metrics()
+            new_threshold = adaptive_ctrl.update(chat_vel, energy)
+            
             # 2. Gather all data for the "Director State" emission
             summary_data = store.get_summary_data()
             breadcrumbs_context = store.get_breadcrumbs(count=5)
@@ -52,7 +59,14 @@ async def summary_ticker(store: ContextStore):
                 prediction=summary_data['prediction'],
                 mood=summary_data['mood'],
                 active_user=breadcrumbs_context.get('active_user'),
-                memories=breadcrumbs_context.get('memories', [])
+                memories=breadcrumbs_context.get('memories', []),
+                # [NEW UI DATA]
+                adaptive_state={
+                    "threshold": round(new_threshold, 2),
+                    "state": adaptive_ctrl.state_label,
+                    "chat_velocity": round(chat_vel, 1),
+                    "energy": round(energy, 2)
+                }
             )
 
             # 3. Re-analyze one stale event
@@ -115,21 +129,21 @@ def emit_audio_context(context): _emit_threadsafe('audio_context', {'context': c
 def emit_twitch_message(username, message): _emit_threadsafe('twitch_message', {'username': username, 'message': message})
 def emit_bot_reply(reply, prompt="", is_censored=False): _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
 
-def emit_director_state(summary, raw_context, prediction, mood, active_user, memories):
+def emit_director_state(summary, raw_context, prediction, mood, active_user, memories, adaptive_state=None):
     _emit_threadsafe('director_state', {
         'summary': summary, 
         'raw_context': raw_context,
         'prediction': prediction,
         'mood': mood,
         'active_user': active_user,
-        'memories': memories
+        'memories': memories,
+        'adaptive': adaptive_state or {}
     })
 
-# [UPDATED] to handle EventScore object
 def emit_event_scored(event: EventItem):
     _emit_threadsafe('event_scored', {
-        'score': event.score.interestingness, # Primary metric for graph
-        'scores': event.score.to_dict(),      # Full detail for inspection
+        'score': event.score.interestingness, 
+        'scores': event.score.to_dict(),
         'timestamp': event.timestamp,
         'text': event.text,
         'source': event.source.name,
@@ -139,9 +153,10 @@ def emit_event_scored(event: EventItem):
 def handle_analysis_complete(event: EventItem):
     """Callback: Updates UI when analysis finishes."""
     emit_event_scored(event)
-    # Refresh state to show new memories/profile updates
     summary_data = store.get_summary_data()
     breadcrumbs = store.get_breadcrumbs(count=5)
+    # For async callback, we might not have fresh adaptive state, so pass empty or cache it
+    # Ideally we'd store global adaptive state to pass here, but for now omit it to avoid complexity
     emit_director_state(
         summary_data['summary'], 
         summary_data['raw_context'], 
@@ -177,40 +192,34 @@ async def ingest_event(sid, payload: dict):
         store.set_active_user(profile)
 
     if source_enum == config.InputSource.BOT_TWITCH_REPLY:
-        # Create dummy zero score
         zero_score = EventScore()
         store.add_event(source_enum, payload_model.text, payload_model.metadata, zero_score)
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
         return
     
-    # 3. Scoring [UPDATED for Multi-Dimensional Scoring]
+    # 3. Scoring
     heuristic_score: EventScore = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
     event = store.add_event(source_enum, payload_model.text, payload_model.metadata, heuristic_score)
     
     emit_event_scored(event)
     
-    # 4. Analysis (Fire and Forget - No Await!)
+    # 4. Analysis
     bundle_event_created = False
-    
-    # Use Interestingness as the primary "Sieve" metric
     primary_score = heuristic_score.interestingness
 
     # Bundling logic
     if source_enum in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.6:
         store.set_pending_speech(event)
-    
     elif source_enum not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.7:
         pending_speech = store.get_and_clear_pending_speech(max_age_seconds=3.0)
         if pending_speech:
             print(f"✅ EVENT BUNDLE: {pending_speech.text} + {event.text}")
             bundle_text = f"User reacted with '{pending_speech.text}' to: '{event.text}'"
             bundle_metadata = {**event.metadata, "is_bundle": True, "speech_text": pending_speech.text, "event_text": event.text}
-            # Give bundles max scores
             bundle_score = EventScore(interestingness=1.0, urgency=0.9, conversational_value=1.0, topic_relevance=1.0)
             bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, bundle_score)
             emit_event_scored(bundle_event)
             
-            # Async Task
             asyncio.create_task(llm_analyst.analyze_and_update_event(
                 bundle_event, store, profile_manager, handle_analysis_complete
             ))
@@ -218,12 +227,11 @@ async def ingest_event(sid, payload: dict):
 
     if not bundle_event_created:
         if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
-            # Async Task
             asyncio.create_task(llm_analyst.analyze_and_update_event(
                 event, store, profile_manager, handle_analysis_complete
             ))
-        elif heuristic_score.urgency >= config.INTERJECTION_THRESHOLD:
-             # Check high urgency items even if low interestingness
+        # [ADAPTIVE CHECK] Use the dynamic threshold from the controller!
+        elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
              asyncio.create_task(llm_analyst.analyze_and_update_event(
                 event, store, profile_manager, handle_analysis_complete
             ))

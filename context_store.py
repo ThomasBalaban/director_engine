@@ -50,7 +50,6 @@ class ContextStore:
         now = time.time()
         item = EventItem(timestamp=now, source=source, text=text, metadata=metadata, score=score)
         with self.lock:
-            # All new events enter the Immediate layer
             self.immediate.append(item)
             self._manage_hierarchy_nolock() 
         return item
@@ -85,10 +84,6 @@ class ContextStore:
             self.active_user_profile = profile
 
     def _manage_hierarchy_nolock(self):
-        """
-        Moves events between layers based on age.
-        Immediate -> Recent -> Background -> Deleted
-        """
         now = time.time()
         
         # 1. Move Immediate -> Recent
@@ -121,7 +116,6 @@ class ContextStore:
     def get_breadcrumbs(self, count: int = 3) -> Dict[str, Any]:
         with self.lock:
             self._manage_hierarchy_nolock()
-            # Flatten immediate + recent for the "short term" breadcrumbs
             active_events = self.immediate + self.recent
             sorted_events = sorted(active_events, key=lambda e: e.score.interestingness, reverse=True)
             
@@ -152,7 +146,6 @@ class ContextStore:
 
     def update_event_score(self, event_id: str, new_score: EventScore) -> bool:
         with self.lock:
-            # Search all layers
             for layer in [self.immediate, self.recent, self.background]:
                 for event in layer:
                     if event.id == event_id:
@@ -195,7 +188,6 @@ class ContextStore:
             self.current_prediction = prediction
             
     def get_all_events_for_summary(self) -> Dict[str, List[EventItem]]:
-        """Returns a dictionary of layers for the summarizer"""
         with self.lock:
             self._manage_hierarchy_nolock()
             return {
@@ -218,7 +210,6 @@ class ContextStore:
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:
         with self.lock:
             self._manage_hierarchy_nolock()
-            # We probably only want to analyze immediate or recent items that missed the initial analysis
             candidates = [
                 e for e in self.immediate + self.recent 
                 if 0.3 < e.score.interestingness < config.OLLAMA_TRIGGER_THRESHOLD 
@@ -227,3 +218,28 @@ class ContextStore:
             ]
             if not candidates: return None
             return sorted(candidates, key=lambda e: e.timestamp, reverse=True)[0]
+
+    # --- NEW: Metrics for Adaptive Thresholds ---
+    def get_activity_metrics(self) -> Tuple[float, float]:
+        """
+        Returns (chat_velocity, stream_energy)
+        chat_velocity: Approx events per minute based on recent window
+        stream_energy: Normalized 0.0-1.0 "hype" factor based on scores
+        """
+        with self.lock:
+            self._manage_hierarchy_nolock()
+            # Use Recent window (last 30s) for calculation
+            events = self.recent
+            if not events:
+                return 0.0, 0.0
+
+            # 1. Chat Velocity (Count of chat items * 2 for Per Minute approx since window is 30s)
+            chat_items = [e for e in events if e.source in [InputSource.TWITCH_CHAT, InputSource.TWITCH_MENTION]]
+            chat_velocity = len(chat_items) * 2.0
+
+            # 2. Stream Energy (Average interestingness of ALL non-chat events)
+            # or just high score density
+            high_energy_items = [e for e in events if e.score.interestingness > 0.7]
+            stream_energy = min(len(high_energy_items) / 5.0, 1.0) # Cap at 1.0 if >5 crazy things happen in 30s
+
+            return chat_velocity, stream_energy
