@@ -5,7 +5,7 @@ import httpx
 from config import (
     OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL, 
     INTERJECTION_THRESHOLD, InputSource, MEMORY_THRESHOLD,
-    ConversationState
+    ConversationState, FlowState, UserIntent # [NEW IMPORTS]
 )
 from context_store import ContextStore, EventItem
 from user_profile_manager import UserProfileManager
@@ -36,15 +36,9 @@ async def close_http_client():
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""
     if username:
-        # [UPDATED PROMPT] - Stricter Fact Extraction
         user_instruction = (
-            f"4. Check if the user '{username}' explicitly states a NEW, CONCRETE fact about themselves "
-            f"(e.g., 'I own a cat', 'I work as a chef', 'I am from Ohio'). "
-            f"Extract ONLY the fact. \n"
-            f"   - REJECT general observations like '{username} is a user' or '{username} is new'.\n"
-            f"   - REJECT meta-descriptions like '{username} revealed a fact' or 'mentioned something'.\n"
-            f"   - REJECT usernames by themselves.\n"
-            f"   - If no concrete personal fact is stated, return an empty list."
+            f"4. Check if the user '{username}' explicitly states a NEW, CONCRETE fact about themselves. "
+            f"Extract ONLY the fact. REJECT general observations/meta-descriptions."
         )
 
     return f"""
@@ -154,9 +148,7 @@ async def analyze_and_update_event(
              store.update_mood(new_sentiment)
 
         if target_user and new_facts:
-            # Validation is now inside update_profile
             profile_manager.update_profile(target_user, {'new_facts': new_facts})
-            # Refresh active user display
             updated_profile = profile_manager.get_profile(target_user)
             store.set_active_user(updated_profile)
             profile_updated = True
@@ -211,31 +203,29 @@ def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
 {background_txt}
 """
     
-    valid_states = ", ".join([s.name for s in ConversationState])
+    conv_states = ", ".join([s.name for s in ConversationState])
+    flow_states = ", ".join([s.name for s in FlowState])
+    intent_states = ", ".join([s.name for s in UserIntent])
     
     prompt = f"""
 You are a situation summarizer.
 {prompt_context}
 
 1. Summarize the CURRENT situation (1-2 sentences). Start with the 'vibe'.
-2. PREDICT user intent or next topic.
-3. Determine the Conversation State from this list: [{valid_states}]
-   - IDLE: Waiting/Quiet
-   - ENGAGED: Active chatting
-   - STORYTELLING: User telling story
-   - TEACHING: Explaining concepts
-   - FRUSTRATED: Struggling/Failing
-   - CELEBRATORY: Winning/Success
+2. PREDICT what might happen next.
+3. CLASSIFY the current state.
 
-Respond:
+Respond using this format EXACTLY:
 [SUMMARY]
-<text>
+<summary text>
 
 [PREDICTION]
-<text>
+<prediction text>
 
-[STATE]
-<ONE_WORD_STATE>
+[CLASSIFICATION]
+State: <{conv_states}>
+Flow: <{flow_states}>
+Intent: <{intent_states}>
 """
     return prompt_context, prompt
 
@@ -255,31 +245,43 @@ async def generate_summary(store: ContextStore):
         
         summary_text = full_response
         prediction_text = "None"
-        new_state = None
         
+        # Parse Summary & Prediction
         if "[SUMMARY]" in full_response:
             parts = full_response.split("[SUMMARY]")
-            remaining = parts[1]
-            
-            if "[PREDICTION]" in remaining:
-                sum_parts = remaining.split("[PREDICTION]")
-                summary_text = sum_parts[0].strip()
-                remaining = sum_parts[1]
-                
-                if "[STATE]" in remaining:
-                    pred_parts = remaining.split("[STATE]")
-                    prediction_text = pred_parts[0].strip()
-                    state_str = pred_parts[1].strip().split('\n')[0].upper()
+            if len(parts) > 1:
+                remainder = parts[1]
+                if "[PREDICTION]" in remainder:
+                    split_pred = remainder.split("[PREDICTION]")
+                    summary_text = split_pred[0].strip()
+                    remainder = split_pred[1]
                     
-                    try:
-                        state_str = state_str.replace('.', '').replace('"', '').strip()
-                        new_state = ConversationState[state_str]
-                    except KeyError:
-                        print(f"[Analyst] Unknown state returned: {state_str}")
+                    if "[CLASSIFICATION]" in remainder:
+                        split_class = remainder.split("[CLASSIFICATION]")
+                        prediction_text = split_class[0].strip()
+                        class_block = split_class[1].strip()
+                        
+                        # Parse Classification Block
+                        lines = class_block.split('\n')
+                        for line in lines:
+                            line = line.strip().upper()
+                            if line.startswith("STATE:"):
+                                try:
+                                    val = line.split(":")[1].strip()
+                                    store.set_conversation_state(ConversationState[val])
+                                except: pass
+                            elif line.startswith("FLOW:"):
+                                try:
+                                    val = line.split(":")[1].strip()
+                                    store.set_flow_state(FlowState[val])
+                                except: pass
+                            elif line.startswith("INTENT:"):
+                                try:
+                                    val = line.split(":")[1].strip()
+                                    store.set_user_intent(UserIntent[val])
+                                except: pass
 
         store.set_summary(summary_text, raw_context, [], [], prediction_text)
-        if new_state:
-            store.set_conversation_state(new_state)
         
     except Exception as e:
         print(f"[Analyst] Summary error: {e}")

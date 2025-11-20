@@ -22,7 +22,6 @@ SOURCE_WEIGHTS = {
     InputSource.SYSTEM_PATTERN: 0.95
 }
 
-# --- [NEW] Conversation State Definition ---
 class ConversationState(Enum):
     IDLE = "quiet, waiting for something to happen"
     ENGAGED = "active conversation happening"
@@ -30,6 +29,29 @@ class ConversationState(Enum):
     TEACHING = "explaining something to chat"
     FRUSTRATED = "user struggling"
     CELEBRATORY = "user succeeded at something"
+
+# --- [NEW] Flow & Intent Definitions ---
+class FlowState(Enum):
+    NATURAL = "natural flow"
+    DRIFTING = "topic drifting"
+    STACCATO = "rapid fire / chaotic"
+    DOMINATED = "user dominating"
+    DEAD_AIR = "awkward silence"
+
+class UserIntent(Enum):
+    CASUAL = "just hanging out"
+    HELP_SEEKING = "needs assistance/backseating"
+    VALIDATION = "wants praise/reaction"
+    ENTERTAINMENT = "performing for stream"
+    INFO_SEEKING = "fishing for specific info"
+    PROVOKING = "trying to trigger bot"
+
+# --- [NEW] Energy System Config ---
+ENERGY_MAX = 100.0
+ENERGY_REGEN_PER_SEC = 2.0
+ENERGY_COST_INTERJECTION = 35.0  # Expensive to interrupt
+ENERGY_COST_REPLY = 10.0         # Cheap to reply when spoken to
+ENERGY_COST_PATTERN = 5.0        # Cheap to acknowledge patterns
 
 # --- Director Config ---
 DIRECTOR_PORT = 8002

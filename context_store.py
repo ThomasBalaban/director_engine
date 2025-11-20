@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from config import (
     InputSource, PRIMARY_MEMORY_COUNT, DEFAULT_MOOD, MOOD_WINDOW_SIZE,
     WINDOW_IMMEDIATE, WINDOW_RECENT, WINDOW_BACKGROUND,
-    ConversationState # [NEW IMPORT]
+    ConversationState, FlowState, UserIntent # [NEW IMPORTS]
 )
 from scoring import EventScore
 import config
@@ -24,10 +24,9 @@ class EventItem:
 
 class ContextStore:
     def __init__(self):
-        # --- HIERARCHICAL STORAGE ---
-        self.immediate: List[EventItem] = []   # < 10s
-        self.recent: List[EventItem] = []      # 10s - 30s
-        self.background: List[EventItem] = []  # 30s - 5m
+        self.immediate: List[EventItem] = []   
+        self.recent: List[EventItem] = []      
+        self.background: List[EventItem] = []  
         
         self.all_memories: List[EventItem] = [] 
         self.lock = threading.Lock()
@@ -35,8 +34,10 @@ class ContextStore:
         self.pending_speech_event: Optional[EventItem] = None
         self.pending_speech_lock = threading.Lock()
         
-        # --- STATE TRACKING ---
-        self.current_conversation_state = ConversationState.IDLE # [NEW]
+        # --- ENHANCED STATE TRACKING ---
+        self.current_conversation_state = ConversationState.IDLE
+        self.current_flow = FlowState.NATURAL    # [NEW]
+        self.current_intent = UserIntent.CASUAL  # [NEW]
         
         self.current_summary: str = "Just starting up."
         self.summary_raw_context: str = "Waiting for events..."
@@ -87,17 +88,28 @@ class ContextStore:
         with self.summary_lock:
             self.active_user_profile = profile
 
-    # [NEW METHOD]
     def set_conversation_state(self, state: ConversationState):
         with self.summary_lock:
             if self.current_conversation_state != state:
-                print(f"🔄 State Transition: {self.current_conversation_state.name} -> {state.name}")
+                # print(f"🔄 State Transition: {self.current_conversation_state.name} -> {state.name}")
                 self.current_conversation_state = state
+
+    # [NEW] State setters
+    def set_flow_state(self, flow: FlowState):
+        with self.summary_lock:
+            if self.current_flow != flow:
+                print(f"🌊 Flow Change: {self.current_flow.name} -> {flow.name}")
+                self.current_flow = flow
+
+    def set_user_intent(self, intent: UserIntent):
+        with self.summary_lock:
+            if self.current_intent != intent:
+                print(f"🎯 Intent Detected: {self.current_intent.name} -> {intent.name}")
+                self.current_intent = intent
 
     def _manage_hierarchy_nolock(self):
         now = time.time()
         
-        # 1. Move Immediate -> Recent
         to_move_recent = []
         keep_immediate = []
         for e in self.immediate:
@@ -109,7 +121,6 @@ class ContextStore:
         self.immediate = keep_immediate
         self.recent.extend(to_move_recent)
 
-        # 2. Move Recent -> Background
         to_move_background = []
         keep_recent = []
         for e in self.recent:
@@ -121,7 +132,6 @@ class ContextStore:
         self.recent = keep_recent
         self.background.extend(to_move_background)
 
-        # 3. Prune Background
         self.background = [e for e in self.background if (now - e.timestamp) <= WINDOW_BACKGROUND]
 
     def get_breadcrumbs(self, count: int = 3) -> Dict[str, Any]:
@@ -152,9 +162,11 @@ class ContextStore:
                 "memories": long_term,
                 "prediction": self.current_prediction,
                 "current_mood": self.current_mood,
-                # [NEW] Include state in breadcrumbs so Nami knows
                 "conversation_state": self.current_conversation_state.name,
-                "active_user": self.active_user_profile
+                "active_user": self.active_user_profile,
+                # [NEW BREADCRUMBS]
+                "flow_state": self.current_flow.name,
+                "user_intent": self.current_intent.name
             }
 
     def update_event_score(self, event_id: str, new_score: EventScore) -> bool:
@@ -218,8 +230,10 @@ class ContextStore:
                 "entities": self.current_entities,
                 "prediction": self.current_prediction,
                 "mood": self.current_mood,
+                "conversation_state": self.current_conversation_state.name,
                 # [NEW]
-                "conversation_state": self.current_conversation_state.name
+                "flow": self.current_flow.name,
+                "intent": self.current_intent.name
             }
 
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:

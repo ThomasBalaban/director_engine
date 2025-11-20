@@ -19,6 +19,7 @@ from scoring import calculate_event_score, EventScore
 from user_profile_manager import UserProfileManager
 from adaptive_controller import AdaptiveController
 from correlation_engine import CorrelationEngine
+from energy_system import EnergySystem # [NEW]
 
 # --- Global variables ---
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -30,6 +31,7 @@ store = ContextStore()
 profile_manager = UserProfileManager()
 adaptive_ctrl = AdaptiveController()
 correlation_engine = CorrelationEngine()
+energy_system = EnergySystem() # [NEW]
 
 async def summary_ticker(store: ContextStore):
     global server_ready
@@ -41,12 +43,12 @@ async def summary_ticker(store: ContextStore):
     
     while True:
         try:
-            # 1. Generate new summary/prediction/STATE
+            # 1. Generate new summary/prediction/state
             await llm_analyst.generate_summary(store)
             
             # 2. Update Adaptive Thresholds
-            chat_vel, energy = store.get_activity_metrics()
-            new_threshold = adaptive_ctrl.update(chat_vel, energy)
+            chat_vel, energy_level = store.get_activity_metrics()
+            new_threshold = adaptive_ctrl.update(chat_vel, energy_level)
             
             # 3. Run Cross-Event Correlation
             patterns = correlation_engine.correlate(store)
@@ -59,25 +61,31 @@ async def summary_ticker(store: ContextStore):
                     pat['score']
                 )
                 emit_event_scored(sys_event)
-            
+                
+                # Check if pattern warrants Nami speaking? 
+                # Usually patterns are just context, but "Engagement Void" might need action.
+                # For now, we leave that to the "Interjection" logic below.
+
             # 4. Gather all data for the "Director State" emission
             summary_data = store.get_summary_data()
             breadcrumbs_context = store.get_breadcrumbs(count=5)
             
-            # Emit everything to UI
             emit_director_state(
                 summary=summary_data['summary'],
                 raw_context=summary_data['raw_context'],
                 prediction=summary_data['prediction'],
                 mood=summary_data['mood'],
-                conversation_state=summary_data['conversation_state'], # [NEW]
+                conversation_state=summary_data['conversation_state'],
+                flow_state=summary_data['flow'],      # [NEW]
+                user_intent=summary_data['intent'],   # [NEW]
                 active_user=breadcrumbs_context.get('active_user'),
                 memories=breadcrumbs_context.get('memories', []),
                 adaptive_state={
                     "threshold": round(new_threshold, 2),
                     "state": adaptive_ctrl.state_label,
                     "chat_velocity": round(chat_vel, 1),
-                    "energy": round(energy, 2)
+                    "energy": round(energy_level, 2),
+                    "social_battery": energy_system.get_status() # [NEW]
                 }
             )
 
@@ -140,13 +148,15 @@ def emit_audio_context(context): _emit_threadsafe('audio_context', {'context': c
 def emit_twitch_message(username, message): _emit_threadsafe('twitch_message', {'username': username, 'message': message})
 def emit_bot_reply(reply, prompt="", is_censored=False): _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
 
-def emit_director_state(summary, raw_context, prediction, mood, conversation_state, active_user, memories, adaptive_state=None):
+def emit_director_state(summary, raw_context, prediction, mood, conversation_state, flow_state, user_intent, active_user, memories, adaptive_state=None):
     _emit_threadsafe('director_state', {
         'summary': summary, 
         'raw_context': raw_context,
         'prediction': prediction,
         'mood': mood,
-        'conversation_state': conversation_state, # [NEW]
+        'conversation_state': conversation_state,
+        'flow': flow_state,       # [NEW]
+        'intent': user_intent,    # [NEW]
         'active_user': active_user,
         'memories': memories,
         'adaptive': adaptive_state or {}
@@ -171,7 +181,9 @@ def handle_analysis_complete(event: EventItem):
         summary_data['raw_context'], 
         summary_data['prediction'],
         summary_data['mood'], 
-        summary_data['conversation_state'], # [NEW]
+        summary_data['conversation_state'],
+        summary_data['flow'],
+        summary_data['intent'],
         breadcrumbs.get('active_user'), 
         breadcrumbs.get('memories', [])
     )
@@ -203,6 +215,9 @@ async def ingest_event(sid, payload: dict):
         zero_score = EventScore()
         store.add_event(source_enum, payload_model.text, payload_model.metadata, zero_score)
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
+        
+        # [ENERGY COST] Reply is cheap but not free
+        energy_system.spend(config.ENERGY_COST_REPLY)
         return
     
     heuristic_score: EventScore = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
@@ -236,9 +251,20 @@ async def ingest_event(sid, payload: dict):
                 event, store, profile_manager, handle_analysis_complete
             ))
         elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
-             asyncio.create_task(llm_analyst.analyze_and_update_event(
-                event, store, profile_manager, handle_analysis_complete
-            ))
+             # [ENERGY CHECK] Can we afford this interjection?
+             if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
+                 # We analyze first. If analysis confirms high score, THEN we interject.
+                 # The actual interjection HTTP call happens inside `llm_analyst.analyze_and_update_event` -> `trigger_nami_interjection`
+                 # We should pass the energy system to that flow or check here?
+                 # For simplicity: We check budget here. If we have budget, we ALLOW the analysis that MIGHT lead to interjection.
+                 # If it actually triggers, we spend the energy then.
+                 
+                 # Wait, `trigger_nami_interjection` is called inside `analyze_and_update_event`.
+                 # Let's modify `trigger_nami_interjection` to check/spend energy.
+                 # Ideally we pass energy_system dependency, but for now let's just allow the analysis.
+                 asyncio.create_task(llm_analyst.analyze_and_update_event(
+                    event, store, profile_manager, handle_analysis_complete
+                ))
 
 @sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
@@ -248,6 +274,7 @@ async def receive_bot_reply(sid, payload: dict):
         payload.get('is_censored', False)
     )
 
+# --- HTTP Endpoints ---
 @app.get("/summary", response_class=PlainTextResponse)
 async def get_summary():
     summary, _ = store.get_summary()
@@ -263,6 +290,7 @@ async def get_summary_data():
 
 app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
+# --- Server Lifecycle ---
 def open_browser():
     try: webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
     except: pass
