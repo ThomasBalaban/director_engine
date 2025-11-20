@@ -9,6 +9,7 @@ class InputSource(Enum):
     TWITCH_CHAT = auto()
     MICROPHONE = auto()
     BOT_TWITCH_REPLY = auto()
+    SYSTEM_PATTERN = auto() # [NEW] For synthesized correlation events
 
 SOURCE_WEIGHTS = {
     InputSource.DIRECT_MICROPHONE: 0.8,
@@ -17,18 +18,18 @@ SOURCE_WEIGHTS = {
     InputSource.VISUAL_CHANGE: 0.4,
     InputSource.TWITCH_CHAT: 0.2,
     InputSource.MICROPHONE: 0.5,
-    InputSource.BOT_TWITCH_REPLY: 0.0
+    InputSource.BOT_TWITCH_REPLY: 0.0,
+    InputSource.SYSTEM_PATTERN: 0.95 # [NEW] Patterns are high-value context
 }
 
 # --- Director Config ---
 DIRECTOR_PORT = 8002
 DIRECTOR_HOST = "0.0.0.0"
 
-# --- Context Hierarchy Config (NEW) ---
-# Time windows in seconds
+# --- Context Hierarchy Config ---
 WINDOW_IMMEDIATE = 10.0
 WINDOW_RECENT = 30.0
-WINDOW_BACKGROUND = 300.0  # 5 minutes
+WINDOW_BACKGROUND = 300.0 
 
 # --- Summary Generation ---
 SUMMARY_INTERVAL_SECONDS = 8.0

@@ -17,8 +17,9 @@ import llm_analyst
 from context_store import ContextStore, EventItem
 from scoring import calculate_event_score, EventScore
 from user_profile_manager import UserProfileManager
-# [NEW IMPORT]
 from adaptive_controller import AdaptiveController
+# [NEW IMPORT]
+from correlation_engine import CorrelationEngine
 
 # --- Global variables ---
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -28,8 +29,9 @@ server_ready: bool = False
 # Initialize Core Systems
 store = ContextStore()
 profile_manager = UserProfileManager()
-# [NEW SYSTEM]
 adaptive_ctrl = AdaptiveController()
+# [NEW SYSTEM]
+correlation_engine = CorrelationEngine()
 
 async def summary_ticker(store: ContextStore):
     global server_ready
@@ -44,11 +46,27 @@ async def summary_ticker(store: ContextStore):
             # 1. Generate new summary/prediction
             await llm_analyst.generate_summary(store)
             
-            # 2. [NEW] Update Adaptive Thresholds
+            # 2. Update Adaptive Thresholds
             chat_vel, energy = store.get_activity_metrics()
             new_threshold = adaptive_ctrl.update(chat_vel, energy)
             
-            # 2. Gather all data for the "Director State" emission
+            # 3. [NEW] Run Cross-Event Correlation
+            # Check for multi-modal patterns (Meme moments, Tilt, etc.)
+            patterns = correlation_engine.correlate(store)
+            
+            for pat in patterns:
+                # Inject the pattern as a new System Event
+                print(f"🧩 [Correlation] {pat['text']}")
+                sys_event = store.add_event(
+                    config.InputSource.SYSTEM_PATTERN, 
+                    pat['text'], 
+                    pat['metadata'], 
+                    pat['score']
+                )
+                # Emit to UI immediately so we see the "Thought"
+                emit_event_scored(sys_event)
+            
+            # 4. Gather all data for the "Director State" emission
             summary_data = store.get_summary_data()
             breadcrumbs_context = store.get_breadcrumbs(count=5)
             
@@ -60,7 +78,6 @@ async def summary_ticker(store: ContextStore):
                 mood=summary_data['mood'],
                 active_user=breadcrumbs_context.get('active_user'),
                 memories=breadcrumbs_context.get('memories', []),
-                # [NEW UI DATA]
                 adaptive_state={
                     "threshold": round(new_threshold, 2),
                     "state": adaptive_ctrl.state_label,
@@ -69,10 +86,9 @@ async def summary_ticker(store: ContextStore):
                 }
             )
 
-            # 3. Re-analyze one stale event
+            # 5. Re-analyze one stale event
             stale_event = store.get_stale_event_for_analysis()
             if stale_event:
-                # Fire and forget stale analysis
                 asyncio.create_task(llm_analyst.analyze_and_update_event(
                     stale_event, 
                     store, 
@@ -155,8 +171,6 @@ def handle_analysis_complete(event: EventItem):
     emit_event_scored(event)
     summary_data = store.get_summary_data()
     breadcrumbs = store.get_breadcrumbs(count=5)
-    # For async callback, we might not have fresh adaptive state, so pass empty or cache it
-    # Ideally we'd store global adaptive state to pass here, but for now omit it to avoid complexity
     emit_director_state(
         summary_data['summary'], 
         summary_data['raw_context'], 
@@ -176,7 +190,7 @@ async def ingest_event(sid, payload: dict):
         print(f"Invalid event payload: {e}")
         return
 
-    # 1. Instant UI Updates (Unblocked!)
+    # 1. Instant UI Updates
     if source_enum == config.InputSource.VISUAL_CHANGE:
         emit_vision_context(payload_model.text)
     elif source_enum in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
@@ -230,7 +244,6 @@ async def ingest_event(sid, payload: dict):
             asyncio.create_task(llm_analyst.analyze_and_update_event(
                 event, store, profile_manager, handle_analysis_complete
             ))
-        # [ADAPTIVE CHECK] Use the dynamic threshold from the controller!
         elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
              asyncio.create_task(llm_analyst.analyze_and_update_event(
                 event, store, profile_manager, handle_analysis_complete
