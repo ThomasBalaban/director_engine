@@ -5,7 +5,7 @@ import threading
 import webbrowser
 from pathlib import Path
 
-from fastapi import FastAPI, BackgroundTasks # type: ignore
+from fastapi import FastAPI # type: ignore
 from fastapi.staticfiles import StaticFiles # type: ignore
 from fastapi.responses import FileResponse, PlainTextResponse # type: ignore
 from pydantic import BaseModel, Field # type: ignore
@@ -16,15 +16,18 @@ import config
 import llm_analyst
 from context_store import ContextStore, EventItem
 from scoring import calculate_event_score
+from user_profile_manager import UserProfileManager
 
 # --- Global variables ---
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
 server_ready: bool = False
+
+# Initialize Core Systems
 store = ContextStore()
+profile_manager = UserProfileManager()
 
 async def summary_ticker(store: ContextStore):
-    """A background task that periodically generates a new summary."""
     global server_ready
     while not server_ready:
         await asyncio.sleep(0.1)
@@ -34,28 +37,33 @@ async def summary_ticker(store: ContextStore):
     
     while True:
         try:
-            # 1. Generate new summary
+            # 1. Generate new summary/prediction
             await llm_analyst.generate_summary(store)
             
-            # 2. Prepare data for emission
+            # 2. Gather all data for the "Director State" emission
             summary_data = store.get_summary_data()
-            
-            # Emit summary (which handles prediction)
-            # We also send memories here as a backup/refresh
             breadcrumbs_context = store.get_breadcrumbs(count=5)
-            emit_current_summary(
-                summary_data['summary'], 
-                summary_data['raw_context'],
-                summary_data['prediction'],
-                breadcrumbs_context.get('memories', []) 
+            
+            # Emit everything to UI
+            emit_director_state(
+                summary=summary_data['summary'],
+                raw_context=summary_data['raw_context'],
+                prediction=summary_data['prediction'],
+                mood=summary_data['mood'],
+                active_user=breadcrumbs_context.get('active_user'),
+                memories=breadcrumbs_context.get('memories', [])
             )
 
-            # 3. Re-analyze one stale event to make graph dynamic
+            # 3. Re-analyze one stale event
             stale_event = store.get_stale_event_for_analysis()
             if stale_event:
-                print(f"[Director] Ticker analyzing stale event: {stale_event.id}")
-                # Use the new handler here too!
-                await llm_analyst.analyze_and_update_event(stale_event, store, handle_analysis_complete)
+                # Fire and forget stale analysis
+                asyncio.create_task(llm_analyst.analyze_and_update_event(
+                    stale_event, 
+                    store, 
+                    profile_manager, 
+                    handle_analysis_complete
+                ))
 
         except Exception as e:
             print(f"[Director] Error in summary ticker: {e}")
@@ -63,15 +71,11 @@ async def summary_ticker(store: ContextStore):
         await asyncio.sleep(config.SUMMARY_INTERVAL_SECONDS)
 
 # --- Application Setup ---
-app = FastAPI(
-    title="Nami Director Engine (Brain 1)",
-    description="Receives, scores, and stores all context events. Provides 'breadcrumbs' to Nami (Brain 2)."
-)
+app = FastAPI(title="Nami Director Engine")
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 socket_app = socketio.ASGIApp(sio)
 app.mount('/socket.io', socket_app)
 
-# --- Static Files Setup ---
 base_path = Path(__file__).parent.resolve()
 ui_path = base_path / "ui"
 audio_path = base_path / "audio_effects"
@@ -88,18 +92,12 @@ async def serve_audio_effect(filename: str):
 
 # --- Pydantic Models ---
 class EventPayload(BaseModel):
-    source_str: str = Field(..., json_schema_extra={"example": "VISUAL_CHANGE"})
-    text: str = Field(..., json_schema_extra={"example": "User opened a new Chrome tab."})
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    username: Optional[str] = Field(None, json_schema_extra={"example": "PeepingOtter"})
-
-class BreadcrumbItem(BaseModel):
-    source: str
+    source_str: str
     text: str
-    score: float
-    timestamp: float
+    metadata: Dict[str, Any] = {}
+    username: Optional[str] = None
 
-# --- Thread-Safe UI Emitters ---
+# --- Emitters ---
 def _emit_threadsafe(event, data):
     global ui_event_loop, server_ready
     if not server_ready or ui_event_loop is None or ui_event_loop.is_closed():
@@ -108,31 +106,25 @@ def _emit_threadsafe(event, data):
         asyncio.run_coroutine_threadsafe(sio.emit(event, data), ui_event_loop)
     except RuntimeError as e:
         if "closed" not in str(e).lower():
-            print(f"⚠️ UI Emit Error: Could not send event '{event}'. Reason: {e}")
-    except Exception as e:
-        print(f"❌ UI Emit Error: Could not send event '{event}'. Reason: {e}")
+            print(f"⚠️ UI Emit Error: {e}")
 
-def emit_vision_context(context): 
-    _emit_threadsafe('vision_context', {'context': context})
-def emit_spoken_word_context(context): 
-    _emit_threadsafe('spoken_word_context', {'context': context})
-def emit_audio_context(context): 
-    _emit_threadsafe('audio_context', {'context': context})
-def emit_twitch_message(username, message): 
-    _emit_threadsafe('twitch_message', {'username': username, 'message': message})
-def emit_bot_reply(reply, prompt="", is_censored=False): 
-    _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
+def emit_vision_context(context): _emit_threadsafe('vision_context', {'context': context})
+def emit_spoken_word_context(context): _emit_threadsafe('spoken_word_context', {'context': context})
+def emit_audio_context(context): _emit_threadsafe('audio_context', {'context': context})
+def emit_twitch_message(username, message): _emit_threadsafe('twitch_message', {'username': username, 'message': message})
+def emit_bot_reply(reply, prompt="", is_censored=False): _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
 
-def emit_current_summary(summary: str, raw_context: str, prediction: str, memories: List[dict]):
-    _emit_threadsafe('current_summary', {
+def emit_director_state(summary, raw_context, prediction, mood, active_user, memories):
+    _emit_threadsafe('director_state', {
         'summary': summary, 
         'raw_context': raw_context,
         'prediction': prediction,
+        'mood': mood,
+        'active_user': active_user,
         'memories': memories
     })
 
 def emit_event_scored(event: EventItem):
-    """Emits a scored event to the UI for the graph."""
     _emit_threadsafe('event_scored', {
         'score': event.score,
         'timestamp': event.timestamp,
@@ -141,26 +133,20 @@ def emit_event_scored(event: EventItem):
         'id': event.id 
     })
 
-def emit_memories_update(memories: List[dict]):
-    """Emits JUST the memory list to the UI for immediate updates."""
-    _emit_threadsafe('memories_update', {
-        'memories': memories
-    })
-
-# --- Callback Handler ---
 def handle_analysis_complete(event: EventItem):
-    """
-    Called when LLM analysis is finished.
-    1. Update the graph (in case score changed)
-    2. Update the memory list (in case memory was promoted)
-    """
-    # Update Graph
+    """Callback: Updates UI when analysis finishes."""
     emit_event_scored(event)
-    
-    # Update Memories UI Immediately
-    breadcrumbs_context = store.get_breadcrumbs(count=5)
-    emit_memories_update(breadcrumbs_context.get('memories', []))
-
+    # Refresh state to show new memories/profile updates
+    summary_data = store.get_summary_data()
+    breadcrumbs = store.get_breadcrumbs(count=5)
+    emit_director_state(
+        summary_data['summary'], 
+        summary_data['raw_context'], 
+        summary_data['prediction'],
+        summary_data['mood'], 
+        breadcrumbs.get('active_user'), 
+        breadcrumbs.get('memories', [])
+    )
 
 # --- Socket.IO Handlers ---
 @sio.on("event")
@@ -169,10 +155,10 @@ async def ingest_event(sid, payload: dict):
         payload_model = EventPayload(**payload)
         source_enum = config.InputSource[payload_model.source_str]
     except Exception as e:
-        print(f"Invalid event payload received: {e}")
+        print(f"Invalid event payload: {e}")
         return
 
-    # Emit to UI context panels
+    # 1. Instant UI Updates (Unblocked!)
     if source_enum == config.InputSource.VISUAL_CHANGE:
         emit_vision_context(payload_model.text)
     elif source_enum in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
@@ -182,57 +168,59 @@ async def ingest_event(sid, payload: dict):
     elif source_enum in [config.InputSource.TWITCH_CHAT, config.InputSource.TWITCH_MENTION]:
         emit_twitch_message(payload_model.username or "Chat", payload_model.text)
     
+    # 2. User Profile
+    if payload_model.username:
+        profile = profile_manager.get_profile(payload_model.username)
+        store.set_active_user(profile)
+
     if source_enum == config.InputSource.BOT_TWITCH_REPLY:
         store.add_event(source_enum, payload_model.text, payload_model.metadata, 0.0)
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
         return
     
+    # 3. Scoring
     sieve_score = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
     event = store.add_event(source_enum, payload_model.text, payload_model.metadata, sieve_score)
     
-    # Emit initial graph point
     emit_event_scored(event)
     
-    bg_tasks = BackgroundTasks()
+    # 4. Analysis (Fire and Forget - No Await!)
     bundle_event_created = False
     
+    # Bundling logic
     if source_enum in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and sieve_score >= 0.6:
         store.set_pending_speech(event)
     
     elif source_enum not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and sieve_score >= 0.7:
         pending_speech = store.get_and_clear_pending_speech(max_age_seconds=3.0)
-        
         if pending_speech:
-            print(f"✅ EVENT BUNDLE: Correlated speech '{pending_speech.text}' with '{event.text}'")
-            bundle_text = f"User reacted with '{pending_speech.text}' to the event: '{event.text}'"
+            print(f"✅ EVENT BUNDLE: {pending_speech.text} + {event.text}")
+            bundle_text = f"User reacted with '{pending_speech.text}' to: '{event.text}'"
             bundle_metadata = {**event.metadata, "is_bundle": True, "speech_text": pending_speech.text, "event_text": event.text}
             bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, 1.0)
-            
-            # Initial emit
             emit_event_scored(bundle_event)
             
-            # Analyze with robust callback
-            bg_tasks.add_task(llm_analyst.analyze_and_update_event, bundle_event, store, handle_analysis_complete)
+            # Async Task
+            asyncio.create_task(llm_analyst.analyze_and_update_event(
+                bundle_event, store, profile_manager, handle_analysis_complete
+            ))
             bundle_event_created = True
 
     if not bundle_event_created:
         if sieve_score >= config.OLLAMA_TRIGGER_THRESHOLD:
-            # Use robust callback here too
-            bg_tasks.add_task(llm_analyst.analyze_and_update_event, event, store, handle_analysis_complete)
+            # Async Task
+            asyncio.create_task(llm_analyst.analyze_and_update_event(
+                event, store, profile_manager, handle_analysis_complete
+            ))
         elif sieve_score >= config.INTERJECTION_THRESHOLD:
-            print(f"[Director] Tier 2 Interjection! Sieve score {sieve_score:.2f} >= {config.INTERJECTION_THRESHOLD}")
-            bg_tasks.add_task(llm_analyst.trigger_nami_interjection, event, sieve_score)
-
-    if bg_tasks.tasks:
-        task = asyncio.create_task(bg_tasks())
-        await task
+             asyncio.create_task(llm_analyst.trigger_nami_interjection(event, sieve_score))
 
 @sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
     emit_bot_reply(
-        reply=payload.get('reply', ''),
-        prompt=payload.get('prompt', ''),
-        is_censored=payload.get('is_censored', False)
+        payload.get('reply', ''),
+        payload.get('prompt', ''),
+        payload.get('is_censored', False)
     )
 
 # --- HTTP Endpoints ---
@@ -253,10 +241,8 @@ app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
 # --- Server Lifecycle ---
 def open_browser():
-    try: 
-        webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
-    except Exception as e: 
-        print(f"Could not open browser: {e}")
+    try: webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
+    except: pass
 
 def run_server():
     global ui_event_loop, summary_ticker_task, server_ready
@@ -265,48 +251,33 @@ def run_server():
     ui_event_loop = loop
     print(f"✅ UI event loop captured: {id(ui_event_loop)}")
     
+    # Initialize Async Clients
     loop.run_until_complete(llm_analyst.create_http_client())
+    
     summary_ticker_task = loop.create_task(summary_ticker(store))
-    print("✅ Summary generation ticker task created")
-    
     server_ready = True
-    print("✅ Server marked as READY - emissions now enabled")
-    print("✅✅✅ DIRECTOR IS NOW READY TO ACCEPT EVENTS ✅✅✅")
+    print("✅ Director Engine is READY")
     
-    config_uvicorn = uvicorn.Config(
-        app, host=config.DIRECTOR_HOST, port=config.DIRECTOR_PORT, log_level="warning", loop="asyncio"
-    )
+    config_uvicorn = uvicorn.Config(app, host=config.DIRECTOR_HOST, port=config.DIRECTOR_PORT, log_level="warning", loop="asyncio")
     server = uvicorn.Server(config_uvicorn)
     
-    print(f"🚀 Starting Uvicorn server on {config.DIRECTOR_HOST}:{config.DIRECTOR_PORT}")
     try:
         loop.run_until_complete(server.serve())
     except KeyboardInterrupt:
-        print("\n⚠️ Keyboard interrupt received")
+        print("\n⚠️ Keyboard interrupt")
     finally:
-        print("🛑 Shutting down Uvicorn server...")
+        print("🛑 Shutting down...")
         server_ready = False
         if summary_ticker_task:
             summary_ticker_task.cancel()
-            try:
-                loop.run_until_complete(summary_ticker_task)
-            except asyncio.CancelledError:
-                pass
+            try: loop.run_until_complete(summary_ticker_task)
+            except: pass
         loop.run_until_complete(llm_analyst.close_http_client())
         loop.close()
-        print("✅ Director Engine server shut down.")
 
 if __name__ == "__main__":
     print("="*60)
     print("🧠 DIRECTOR ENGINE (Brain 1) - Starting...")
     print("="*60)
-    print(f"📡 Port: {config.DIRECTOR_PORT}")
-    print(f"🤖 Ollama Model: {config.OLLAMA_MODEL}")
-    print(f"⏱️  Summary Interval: {config.SUMMARY_INTERVAL_SECONDS}s")
-    print(f"🎯 Ollama Trigger: {config.OLLAMA_TRIGGER_THRESHOLD}")
-    print(f"🚨 Interjection Threshold: {config.INTERJECTION_THRESHOLD}")
-    print(f"💾 Memory Threshold: {config.MEMORY_THRESHOLD}")
-    print("="*60)
-
     threading.Timer(2.0, open_browser).start()
     run_server()

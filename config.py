@@ -34,12 +34,22 @@ SUMMARY_INTERVAL_SECONDS = 8.0
 INTERJECTION_THRESHOLD = 0.9
 NAMI_INTERJECT_URL = "http://localhost:8000/funnel/interject"
 
-# --- MEMORY & PREDICTION CONFIG ---
-# Events with a score above this are saved to "Long Term Memory"
+# --- MEMORY CONFIG ---
 # *** CHANGED TO 0.1 FOR TESTING (Normally 0.85) ***
-MEMORY_THRESHOLD = 0.7
-# How many top memories to send to Brain 2 (Active/Primary memories)
+MEMORY_THRESHOLD = 0.1 
 PRIMARY_MEMORY_COUNT = 5
+
+# --- USER PROFILES (NEW) ---
+PROFILES_DIR = "profiles"
+DEFAULT_RELATIONSHIP_TIER = "Stranger"
+DEFAULT_AFFINITY = 0
+
+# --- MOOD ENGINE (NEW) ---
+# Valid moods Nami can enter
+VALID_MOODS = ["Neutral", "Happy", "Annoyed", "Scared", "Horny", "Tired"]
+DEFAULT_MOOD = "Neutral"
+# How many recent events to consider for mood shifting
+MOOD_WINDOW_SIZE = 5 
 
 # --- Analyst (Ollama) Config ---
 OLLAMA_TRIGGER_THRESHOLD = 0.5
