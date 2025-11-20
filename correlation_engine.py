@@ -11,8 +11,33 @@ class CorrelationEngine:
         self.last_pattern_time = 0
         self.cooldown = 10.0 
         
+    def _calculate_momentum(self, history: List[str]) -> str:
+        if len(history) < 3: return "Stable"
+        
+        # Map sentiments to values
+        val_map = {
+            "excited": 2, "happy": 1, "positive": 1, "neutral": 0,
+            "annoyed": -1, "frustrated": -2, "angry": -3, "scared": -2
+        }
+        
+        values = [val_map.get(h, 0) for h in history[-5:]]
+        if not values: return "Stable"
+        
+        # Simple slope check
+        start = values[0]
+        end = values[-1]
+        delta = end - start
+        
+        if delta >= 2: return "Escalating_Positive"
+        if delta <= -2: return "Escalating_Negative"
+        return "Stable"
+        
     def correlate(self, store: ContextStore) -> List[Dict[str, Any]]:
         now = time.time()
+        
+        # 1. Update Momentum
+        store.emotional_momentum = self._calculate_momentum(store.sentiment_history)
+        
         if now - self.last_pattern_time < self.cooldown: return []
             
         patterns = []
@@ -24,6 +49,14 @@ class CorrelationEngine:
         visuals = [e for e in events if e.source == InputSource.VISUAL_CHANGE]
         chat = [e for e in events if e.source in [InputSource.TWITCH_CHAT, InputSource.TWITCH_MENTION]]
         speech = [e for e in events if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]]
+
+        # Momentum Pattern
+        if store.emotional_momentum == "Escalating_Negative":
+             patterns.append({
+                "text": "Warning: Mood is deteriorating rapidly. Intervention needed.",
+                "score": EventScore(interestingness=0.9, urgency=0.8, emotional_intensity=0.9),
+                "metadata": {"type": "pattern_momentum_neg"}
+            })
 
         # 1. Meme Moment
         if visuals and len(chat) >= 4:
@@ -80,19 +113,12 @@ class CorrelationEngine:
                 "metadata": {"type": "pattern_scare"}
             })
 
-        # --- 6. Silence Profiling (UPDATED) ---
+        # 6. Silence Profiling
         if not layers['immediate']: # Silence in last 10s
-            
             # Check for Technical Silence (Loading screens)
             last_vis = layers['recent'][-1] if layers['recent'] and layers['recent'][-1].source == InputSource.VISUAL_CHANGE else None
             if last_vis and any(k in last_vis.text.lower() for k in ["loading", "menu", "pause", "saving"]):
-                # Technical Silence - Ignore
                 pass
-                
-            # Check for Suspense (Game audio high, but no speech)
-            # This requires detailed audio metadata we might not fully have yet, but we can infer
-            
-            # Check for Awkward/Dead Air
             else:
                 avg_score = sum(e.score.interestingness for e in layers['recent']) / len(layers['recent']) if layers['recent'] else 0
                 if avg_score < 0.25 and len(layers['recent']) < 3:

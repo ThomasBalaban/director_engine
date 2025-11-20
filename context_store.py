@@ -5,9 +5,9 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple, Optional
 from config import (
-    InputSource, PRIMARY_MEMORY_COUNT, DEFAULT_MOOD, MOOD_WINDOW_SIZE,
+    InputSource, DEFAULT_MOOD, MOOD_WINDOW_SIZE,
     WINDOW_IMMEDIATE, WINDOW_RECENT, WINDOW_BACKGROUND,
-    ConversationState, FlowState, UserIntent, SceneType # [NEW IMPORT]
+    ConversationState, FlowState, UserIntent, SceneType
 )
 from scoring import EventScore
 import config
@@ -20,7 +20,22 @@ class EventItem:
     metadata: Dict[str, Any]
     score: EventScore 
     memory_text: Optional[str] = None 
+    thread_id: Optional[str] = None # Multi-turn thread tracking
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
+
+@dataclass
+class FocusState:
+    target_event_id: Optional[str] = None
+    topic: Optional[str] = None
+    locked_until: float = 0.0
+    strength: float = 0.0
+
+@dataclass
+class DebtItem:
+    text: str
+    timestamp: float
+    topic: str
+    status: str = "unresolved" # unresolved, satisfied, expired
 
 class ContextStore:
     def __init__(self):
@@ -28,8 +43,7 @@ class ContextStore:
         self.recent: List[EventItem] = []      
         self.background: List[EventItem] = []
         
-        # [NEW] Semantic Compression Log
-        # Stores strings like "10:00-10:05: User fought the boss and died repeatedly."
+        # Semantic Compression Log
         self.narrative_log: List[str] = []
         
         self.all_memories: List[EventItem] = [] 
@@ -38,11 +52,22 @@ class ContextStore:
         self.pending_speech_event: Optional[EventItem] = None
         self.pending_speech_lock = threading.Lock()
         
-        # --- ENHANCED STATE TRACKING ---
+        # --- CORE STATE ---
         self.current_conversation_state = ConversationState.IDLE
         self.current_flow = FlowState.NATURAL
         self.current_intent = UserIntent.CASUAL
-        self.current_scene = SceneType.CHILL_CHATTING # [NEW]
+        self.current_scene = SceneType.CHILL_CHATTING
+        
+        # --- ATTENTION SYSTEM ---
+        self.focus_state = FocusState()
+        
+        # --- CONVERSATIONAL DEBT ---
+        self.conversation_debt: List[DebtItem] = []
+        
+        # --- EMOTIONAL MOMENTUM ---
+        self.sentiment_history: List[str] = []
+        self.emotional_momentum: str = "Stable" # Stable, Escalating_Positive, Escalating_Negative, Crash
+        self.current_mood: str = DEFAULT_MOOD
         
         self.current_summary: str = "Just starting up."
         self.summary_raw_context: str = "Waiting for events..."
@@ -50,8 +75,6 @@ class ContextStore:
         self.current_entities: List[str] = []
         self.current_prediction: str = "Observing flow..."
         
-        self.current_mood: str = DEFAULT_MOOD
-        self.sentiment_history: List[str] = [] 
         self.active_user_profile: Optional[Dict[str, Any]] = None 
         
         self.summary_lock = threading.Lock()
@@ -63,13 +86,27 @@ class ContextStore:
             self.immediate.append(item)
             self._manage_hierarchy_nolock() 
         return item
+
+    def add_debt(self, text: str, topic: str = "general"):
+        """Registers a question Nami asked that needs an answer."""
+        with self.lock:
+            self.conversation_debt.append(DebtItem(text=text, timestamp=time.time(), topic=topic))
+            print(f"🧾 [Debt] Added: '{text}'")
+
+    def resolve_debt(self, topic: str = None) -> Optional[DebtItem]:
+        """Marks a debt as resolved if relevant input comes in."""
+        with self.lock:
+            # Simple resolution: pop the oldest unresolved debt
+            if self.conversation_debt:
+                item = self.conversation_debt.pop(0)
+                print(f"🧾 [Debt] Resolved: '{item.text}'")
+                return item
+        return None
     
-    # [NEW] Narrative Compression
     def add_narrative_segment(self, text: str):
         """Adds a compressed summary of past events to the permanent log."""
         with self.lock:
             self.narrative_log.append(text)
-            # Keep last ~50 narrative chunks (approx 2-3 hours of history)
             if len(self.narrative_log) > 50:
                 self.narrative_log.pop(0)
             print(f"📜 [Context] Added narrative segment: {text[:50]}...")
@@ -118,7 +155,6 @@ class ContextStore:
             if self.current_intent != intent:
                 self.current_intent = intent
     
-    # [NEW] Scene Setter
     def set_scene(self, scene: SceneType):
         with self.summary_lock:
             if self.current_scene != scene:
@@ -150,7 +186,7 @@ class ContextStore:
         self.recent = keep_recent
         self.background.extend(to_move_background)
 
-        # Prune Background (BUT events here are read by Compressor before deletion)
+        # Prune Background
         self.background = [e for e in self.background if (now - e.timestamp) <= WINDOW_BACKGROUND]
 
     def get_breadcrumbs(self, count: int = 3) -> Dict[str, Any]:
@@ -169,15 +205,16 @@ class ContextStore:
         with self.summary_lock:
             return {
                 "recent_events": short_term,
-                # Memories will be populated by memory_ops
                 "memories": [], 
                 "prediction": self.current_prediction,
                 "current_mood": self.current_mood,
+                "emotional_momentum": self.emotional_momentum,
+                "focus_topic": self.focus_state.topic,
                 "conversation_state": self.current_conversation_state.name,
                 "active_user": self.active_user_profile,
                 "flow_state": self.current_flow.name,
                 "user_intent": self.current_intent.name,
-                "scene": self.current_scene.name # [NEW]
+                "scene": self.current_scene.name
             }
 
     def update_event_score(self, event_id: str, new_score: EventScore) -> bool:
@@ -241,10 +278,11 @@ class ContextStore:
                 "entities": self.current_entities,
                 "prediction": self.current_prediction,
                 "mood": self.current_mood,
+                "emotional_momentum": self.emotional_momentum,
                 "conversation_state": self.current_conversation_state.name,
                 "flow": self.current_flow.name,
                 "intent": self.current_intent.name,
-                "scene": self.current_scene.name # [NEW]
+                "scene": self.current_scene.name
             }
 
     def get_stale_event_for_analysis(self) -> Optional[EventItem]:

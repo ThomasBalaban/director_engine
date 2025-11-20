@@ -131,8 +131,6 @@ async def summary_ticker(store: ContextStore):
                         "type": "narrative"
                     })
             elif not memories_list and summary_data['summary']:
-                # If absolutely nothing else is in memory, show the current summary
-                # so the panel doesn't look broken.
                 memories_list.append({
                     "source": "WORKING_MEMORY",
                     "text": f"Current Context: {summary_data['summary']}",
@@ -271,6 +269,10 @@ async def ingest_event(sid, payload: dict):
         zero_score = EventScore()
         store.add_event(source_enum, payload_model.text, payload_model.metadata, zero_score)
         emit_twitch_message(payload_model.username or "Nami", payload_model.text)
+        
+        # Register debt for questions asked
+        behavior_engine.register_bot_action(store, payload_model.text)
+        
         energy_system.spend(config.ENERGY_COST_REPLY)
         return
     
@@ -278,6 +280,10 @@ async def ingest_event(sid, payload: dict):
     event = store.add_event(source_enum, payload_model.text, payload_model.metadata, heuristic_score)
     emit_event_scored(event)
     
+    # Check for debt resolution
+    if source_enum in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
+         behavior_engine.check_debt_resolution(store, payload_model.text)
+
     bundle_event_created = False
     primary_score = heuristic_score.interestingness
 
@@ -293,21 +299,31 @@ async def ingest_event(sid, payload: dict):
             bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, bundle_score)
             emit_event_scored(bundle_event)
             
+            # Bundles always bypass attention locks because they are high-context user interactions
             asyncio.create_task(llm_analyst.analyze_and_update_event(
                 bundle_event, store, profile_manager, handle_analysis_complete
             ))
             bundle_event_created = True
 
     if not bundle_event_created:
-        if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
-            asyncio.create_task(llm_analyst.analyze_and_update_event(
-                event, store, profile_manager, handle_analysis_complete
-            ))
-        elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
-             if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
-                 asyncio.create_task(llm_analyst.analyze_and_update_event(
+        # [NEW] ATTENTION COMPETITION LOGIC
+        # We ask the behavior engine: "Does this event deserve attention right now?"
+        # It will return the event if YES (and lock focus), or None if NO.
+        attended_event = behavior_engine.direct_attention(store, [event])
+        
+        if attended_event:
+            if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
+                asyncio.create_task(llm_analyst.analyze_and_update_event(
                     event, store, profile_manager, handle_analysis_complete
                 ))
+            elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
+                 if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
+                     asyncio.create_task(llm_analyst.analyze_and_update_event(
+                        event, store, profile_manager, handle_analysis_complete
+                    ))
+        else:
+            # If we are here, the event was ignored due to focus lock
+            print(f"🛡️ [Attention] Blocked low-priority event: {event.source.name} (Score: {primary_score:.2f})")
 
 @sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
