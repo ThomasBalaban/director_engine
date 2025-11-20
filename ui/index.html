@@ -5,43 +5,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nami's Brain</title>
+    
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
     
-    <style>
-        body { background-color: #1a1a1a; color: #e0e0e0; font-family: 'Inter', sans-serif; }
-        .panel { background-color: #2a2a2a; border: 1px solid #444; border-radius: 0.75rem; display: flex; flex-direction: column; overflow: hidden; }
-        .panel-title { background-color: #3a3a3a; color: #fff; padding: 0.75rem 1.25rem; font-weight: 600; border-bottom: 1px solid #444; flex-shrink: 0; }
-        .panel-content { padding: 1.25rem; overflow-y: auto; flex-grow: 1; }
-        .log-list { font-family: 'monospace'; font-size: 0.875rem; }
-        .log-list .log-line { padding: 0.25rem 0.25rem 0.25rem 0.5rem; }
-        .twitch-user { color: #a970ff; font-weight: 600; }
-        .nami-reply { color: #63e2b7; }
-        .highlight-word { color: #d8b4fe; font-weight: 600; background-color: rgba(169, 112, 255, 0.2); padding: 1px 4px; border-radius: 4px; }
-        
-        /* Mood Colors */
-        .mood-Happy { color: #FCD34D; border-color: #FCD34D; }
-        .mood-Annoyed { color: #F87171; border-color: #F87171; }
-        .mood-Scared { color: #A78BFA; border-color: #A78BFA; }
-        .mood-Neutral { color: #63e2b7; border-color: #63e2b7; }
-        
-        /* User Card */
-        .user-card { background: #202020; padding: 10px; border-radius: 8px; border: 1px solid #444; }
-        .user-card h3 { font-size: 0.9rem; font-weight: 700; color: #fff; }
-        .user-badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; background: #444; color: #bbb; }
-        
-        /* Censorship Styling */
-        .censored-reply { background-color: rgba(239, 68, 68, 0.2) !important; border-left: 3px solid #ef4444 !important; border-radius: 4px !important; padding: 0.25rem 0.5rem !important; }
-        .censored-indicator { color: #ef4444; font-weight: 600; font-size: 0.75rem; margin-left: 0.5rem; }
-
-        #interest-chart { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
-        
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: #1a1a1a; }
-        ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #555; }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
 
 <body class="h-screen overflow-hidden flex flex-col p-4 md:p-6 lg:p-8">
@@ -58,16 +27,22 @@
         <div class="grid grid-cols-1 lg:grid-cols-4 gap-6 flex-1 min-h-0">
             
             <div class="flex flex-col gap-6 min-h-0">
-                <div class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">🧠 Summary & Prediction</h2>
+                <div id="summary-panel" class="panel h-1/3 min-h-0">
+                    <h2 class="panel-title">🧠 Current Summary</h2>
                     <div class="panel-content">
-                        <div class="bg-[#333] p-4 rounded-lg border border-[#555] mb-4">
-                            <p id="summary-text" class="text-white font-medium">Waiting...</p>
-                            <p id="prediction-text" class="text-[#63e2b7] mt-2 pt-2 border-t border-[#444] font-semibold">🔮 Intuition: ...</p>
-                        </div>
-                        <div class="flex-1 relative h-40"> 
+                        <div class="summary-text" id="summary-text">Waiting for summary...</div>
+                        <div class="summary-raw-context" id="summary-raw-context">Raw context...</div>
+                    </div>
+                </div>
+                
+                <div id="interest-graph-panel" class="panel flex-1 min-h-0">
+                    <h2 class="panel-title">📈 Interest Graph</h2>
+                    <div class="panel-content flex flex-col">
+                        <div class="flex-1 relative" style="width:100%; min-height: 120px;"> 
                             <canvas id="interest-chart"></canvas>
                         </div>
+                        <pre id="graph-data-log" class="text-xs text-gray-400 flex-none h-32 overflow-y-auto pt-2 border-t border-gray-700 mt-2">
+[Waiting for scores...]</pre>
                     </div>
                 </div>
             </div>
@@ -75,265 +50,56 @@
             <div class="flex flex-col gap-6 min-h-0">
                 <div class="panel flex-1 min-h-0">
                     <h2 class="panel-title">👁️ Vision (12s)</h2>
-                    <div class="panel-content"><pre id="vision-context" class="text-xs whitespace-pre-wrap text-gray-300">Waiting...</pre></div>
+                    <div class="panel-content"><pre id="vision-context" class="context-box text-xs text-gray-300">Waiting...</pre></div>
                 </div>
                 <div class="panel flex-1 min-h-0">
                     <h2 class="panel-title">🎤 Speech (30s)</h2>
-                    <div class="panel-content"><pre id="spoken-word-context" class="text-xs whitespace-pre-wrap text-gray-300">Waiting...</pre></div>
+                    <div class="panel-content"><pre id="spoken-word-context" class="context-box text-xs text-gray-300">Waiting...</pre></div>
                 </div>
                 <div class="panel flex-1 min-h-0">
                     <h2 class="panel-title">🔊 Audio (12s)</h2>
-                    <div class="panel-content"><pre id="audio-context" class="text-xs whitespace-pre-wrap text-gray-300">Waiting...</pre></div>
+                    <div class="panel-content"><pre id="audio-context" class="context-box text-xs text-gray-300">Waiting...</pre></div>
                 </div>
             </div>
 
             <div class="flex flex-col gap-6 min-h-0">
                 <div class="panel flex-1 min-h-0">
                     <h2 class="panel-title">💬 Chat</h2>
-                    <div id="twitch-messages" class="panel-content text-sm"></div>
+                    <div id="twitch-messages" class="panel-content text-sm log-list"></div>
                 </div>
                 <div class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">🤖 Nami</h2>
-                    <div id="nami-replies" class="panel-content text-sm"></div>
+                    <h2 class="panel-title">🤖 Nami's Brain</h2>
+                    <div id="nami-replies" class="panel-content text-sm log-list"></div>
                 </div>
             </div>
 
             <div class="flex flex-col gap-6 min-h-0">
-                <div id="user-panel" class="panel flex-none h-1/3 min-h-0">
-                    <h2 class="panel-title">👤 Active User</h2>
-                    <div class="panel-content" id="user-content">
-                        <p class="text-gray-500 italic text-sm text-center mt-4">No active user context.</p>
+                <div id="prediction-panel" class="panel flex-none min-h-0">
+                    <h2 class="panel-title">🔮 Anticipation</h2>
+                    <div class="panel-content bg-[#252525]">
+                        <p id="prediction-text" class="prediction-text">Observing flow...</p>
                     </div>
                 </div>
-                <div class="panel flex-1 min-h-0">
+
+                <div id="user-panel" class="panel flex-none min-h-0">
+                    <h2 class="panel-title">👤 Active User</h2>
+                    <div class="panel-content" id="user-content">
+                        <p class="text-gray-500 italic text-sm text-center">No active user context.</p>
+                    </div>
+                </div>
+
+                <div id="memory-panel" class="panel flex-1 min-h-0">
                     <h2 class="panel-title">💾 Memories</h2>
                     <div class="panel-content">
-                        <ul id="memory-list" class="space-y-3"></ul>
+                        <ul id="memory-list" class="space-y-3">
+                            <li class="text-gray-500 italic text-sm text-center">Waiting for highlights...</li>
+                        </ul>
                     </div>
                 </div>
             </div>
 
         </div>
     </div>
-
-    <script>
-        const socket = io("http://localhost:8002");
-        
-        // DOM Elements
-        const moodPill = document.getElementById('mood-pill');
-        const moodText = document.getElementById('mood-text');
-        const summaryEl = document.getElementById('summary-text');
-        const predictionEl = document.getElementById('prediction-text');
-        const userContentEl = document.getElementById('user-content');
-        const memoryListEl = document.getElementById('memory-list');
-        
-        // Context Logs
-        const visionLog = [];
-        const spokenLog = [];
-        const audioLog = [];
-
-        // Chart.js
-        const CHART_HISTORY_SIZE = 50;
-        let interestChart;
-        const scoreLabels = []; 
-        const scoreData = [];
-        
-        function initializeChart() {
-            if (typeof Chart === 'undefined') return;
-            const ctx = document.getElementById('interest-chart').getContext('2d');
-            interestChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: scoreLabels,
-                    datasets: [{
-                        label: 'Interest Score', 
-                        data: scoreData, 
-                        borderColor: '#63e2b7',
-                        backgroundColor: 'rgba(99, 226, 183, 0.2)', 
-                        tension: 0.3, 
-                        pointRadius: 2, 
-                        fill: true
-                    }]
-                },
-                options: {
-                    responsive: true, 
-                    maintainAspectRatio: false, 
-                    animation: { duration: 0 },
-                    scales: { 
-                        y: { min: 0.0, max: 1.0, ticks: { color: '#e0e0e0' }, grid: { color: '#444' } }, 
-                        x: { display: false } 
-                    },
-                    plugins: { legend: { display: false } }
-                }
-            });
-        }
-        window.onload = initializeChart;
-
-        // --- State Handlers ---
-        socket.on('director_state', (data) => {
-            const mood = data.mood || 'Neutral';
-            moodText.textContent = mood;
-            moodPill.className = `px-4 py-2 border-2 rounded-full font-bold text-lg flex items-center gap-2 mood-${mood}`;
-            
-            summaryEl.textContent = data.summary || 'No summary.';
-            predictionEl.textContent = `🔮 Intuition: ${data.prediction || '...'}`;
-            
-            if (data.active_user) {
-                const u = data.active_user;
-                userContentEl.innerHTML = `
-                    <div class="user-card">
-                        <div class="flex justify-between items-center mb-2">
-                            <h3>${u.username}</h3>
-                            <span class="user-badge">${u.relationship.tier}</span>
-                        </div>
-                        <div class="text-xs text-gray-400 mb-2">Nickname: <span class="text-white">${u.nickname}</span></div>
-                        <div class="text-xs text-gray-400 mb-2">Affinity: <div class="w-full bg-gray-700 h-1 rounded mt-1"><div class="bg-purple-500 h-1 rounded" style="width: ${u.relationship.affinity}%"></div></div></div>
-                        <div class="text-xs text-gray-300 mt-2 border-t border-[#444] pt-2">
-                            <strong>Facts:</strong>
-                            <ul class="list-disc pl-4 mt-1 text-gray-400">
-                                ${u.facts.slice(-3).map(f => `<li>${f.content}</li>`).join('')}
-                            </ul>
-                        </div>
-                    </div>
-                `;
-            } else {
-                userContentEl.innerHTML = `<p class="text-gray-500 italic text-sm text-center mt-4">No active user context.</p>`;
-            }
-            
-            if (data.memories && data.memories.length > 0) {
-                memoryListEl.innerHTML = data.memories.map(mem => `
-                    <li class="border-l-2 border-purple-500 pl-3 bg-[#2a2a2a] p-2 rounded text-sm">
-                        <div class="flex justify-between"><span class="text-purple-400 text-xs font-bold">${mem.source}</span> <span class="text-gray-500 text-xs">${mem.score}</span></div>
-                        <div class="text-gray-300 leading-snug">${mem.text}</div>
-                    </li>
-                `).join('');
-            } else {
-                memoryListEl.innerHTML = '<li class="text-gray-500 italic text-sm text-center mt-4">No high-impact memories yet.</li>';
-            }
-        });
-
-        // --- Log Helpers ---
-        const MAX_LOG_LINES = 100;
-        const MAX_PANEL_LINES = 20;
-
-        function updateAmbientLog(elementId, logArray, newText) {
-            const el = document.getElementById(elementId);
-            logArray.push(newText);
-            if (logArray.length > MAX_PANEL_LINES) {
-                logArray.shift();
-            }
-            el.textContent = logArray.join('\n\n');
-            el.parentElement.scrollTop = el.parentElement.scrollHeight;
-        }
-
-        function appendLog(element, html) {
-            element.insertAdjacentHTML('beforeend', html);
-            while (element.children.length > MAX_LOG_LINES) {
-                element.removeChild(element.firstChild);
-            }
-            element.scrollTop = element.scrollHeight;
-        }
-
-        function sanitizeHTML(str) {
-            const temp = document.createElement('div'); 
-            temp.textContent = str; 
-            return temp.innerHTML;
-        }
-        
-        function highlightMentions(message) {
-            const sanitizedMessage = sanitizeHTML(message);
-            const regex = /(nami|peepingnami)/gi;
-            return sanitizedMessage.replace(regex, '<span class="highlight-word">$&</span>');
-        }
-
-        // --- Data Listeners ---
-        socket.on('vision_context', d => updateAmbientLog('vision-context', visionLog, d.context));
-        socket.on('spoken_word_context', d => updateAmbientLog('spoken-word-context', spokenLog, d.context));
-        socket.on('audio_context', d => updateAmbientLog('audio-context', audioLog, d.context));
-
-        socket.on('event_scored', (data) => {
-            if (interestChart) {
-                scoreLabels.push(""); 
-                scoreData.push(data.score.toFixed(2));
-                if (scoreData.length > CHART_HISTORY_SIZE) { 
-                    scoreLabels.shift(); 
-                    scoreData.shift(); 
-                }
-                interestChart.update('none');
-            }
-        });
-
-        socket.on('twitch_message', (data) => {
-            const isMention = /(nami|peepingnami)/gi.test(data.message);
-            const bgClass = isMention ? 'mention-bg' : '';
-            const formattedMessage = highlightMentions(data.message);
-            
-            const html = `
-                <div class="log-line ${bgClass}">
-                    <span class="twitch-user">${sanitizeHTML(data.username)}:</span> 
-                    <span>${formattedMessage}</span>
-                </div>`;
-            
-            appendLog(document.getElementById('twitch-messages'), html);
-        });
-
-        socket.on('bot_reply', (data) => {
-            const sanitizedReply = sanitizeHTML(data.reply);
-            const isCensored = data.is_censored || false;
-            const censorshipClass = isCensored ? 'censored-reply' : '';
-            const censorshipIndicator = isCensored ? '<span class="censored-indicator">🚨 FILTERED</span>' : '';
-
-            // 1. Add to Nami Panel (Brain 2) - Shows extra debug info like "Context" drawer
-            const namiHTML = `<div class="log-line nami-reply cursor-pointer ${censorshipClass}" onclick="openDrawer(this)" 
-                data-reply="${encodeURIComponent(data.reply)}" data-sent="${encodeURIComponent(data.prompt)}" data-censored="${isCensored}">
-                <strong>Nami:</strong> ${sanitizedReply}${censorshipIndicator}
-                <span class="ml-2 opacity-0 group-hover:opacity-100 text-xs text-gray-400 align-middle">📄 Context</span></div>`;
-            
-            appendLog(document.getElementById('nami-replies'), namiHTML);
-
-            // 2. Add to Twitch Chat Panel - Shows as a normal chat message
-            const chatHTML = `
-                <div class="log-line" style="background-color: rgba(99, 226, 183, 0.05);">
-                    <span class="twitch-user" style="color: #63e2b7;">Nami:</span> 
-                    <span>${sanitizedReply}</span>
-                </div>`;
-            
-            appendLog(document.getElementById('twitch-messages'), chatHTML);
-        });
-        
-        // --- Drawer Logic ---
-        window.openDrawer = function(el) {
-            const sent = decodeURIComponent(el.getAttribute('data-sent'));
-            const replyRaw = decodeURIComponent(el.getAttribute('data-reply'));
-            const isCensored = el.getAttribute('data-censored') === 'true';
-            
-            document.getElementById('drawer-sent').textContent = sent;
-            const replyEl = document.getElementById('drawer-reply');
-            
-            if (isCensored) {
-                replyEl.innerHTML = `<div style="color: #ef4444; font-weight: 600; margin-bottom: 0.5rem;">🚨 CONTENT FILTERED - Original Response:</div>`;
-                const textEl = document.createElement('div');
-                textEl.textContent = replyRaw;
-                replyEl.appendChild(textEl);
-                replyEl.style.borderColor = '#ef4444';
-                replyEl.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
-            } else {
-                replyEl.textContent = replyRaw;
-                replyEl.style.borderColor = '#3a3a3a';
-                replyEl.style.backgroundColor = '#1f1f1f';
-            }
-            
-            document.getElementById('context-drawer').classList.remove('translate-x-full');
-            document.getElementById('context-drawer-overlay').classList.remove('hidden');
-        };
-        
-        window.closeDrawer = function() {
-            document.getElementById('context-drawer').classList.add('translate-x-full');
-            document.getElementById('context-drawer-overlay').classList.add('hidden');
-        };
-        
-        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrawer(); });
-    </script>
     
     <div id="context-drawer-overlay" class="fixed inset-0 bg-black/50 hidden z-40" onclick="closeDrawer()"></div>
     <aside id="context-drawer" class="fixed top-0 right-0 h-screen w-full max-w-md translate-x-full transition-transform duration-200 ease-out bg-[#2a2a2a] border-l border-[#444] shadow-xl flex flex-col z-50">
@@ -346,5 +112,7 @@
             <div><h4 class="text-gray-400 text-xs uppercase mb-1">Response</h4><pre id="drawer-reply" class="bg-[#111] p-2 text-sm text-gray-300 whitespace-pre-wrap rounded border border-[#333]"></pre></div>
         </div>
     </aside>
+
+    <script src="script.js"></script>
 </body>
 </html>

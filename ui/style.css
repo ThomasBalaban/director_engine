@@ -1,0 +1,132 @@
+body { background-color: #1a1a1a; color: #e0e0e0; font-family: 'Inter', sans-serif; }
+
+.panel { 
+    background-color: #2a2a2a; 
+    border: 1px solid #444; 
+    border-radius: 0.75rem; 
+    display: flex; 
+    flex-direction: column; 
+    overflow: hidden; 
+}
+
+.panel-title { 
+    background-color: #3a3a3a; 
+    color: #fff; 
+    padding: 0.75rem 1.25rem; 
+    font-weight: 600; 
+    border-bottom: 1px solid #444; 
+    flex-shrink: 0; 
+}
+
+.panel-content { 
+    padding: 1.25rem; 
+    overflow-y: auto; 
+    flex-grow: 1; 
+}
+
+.log-list { 
+    font-family: 'monospace'; 
+    font-size: 0.875rem; 
+}
+
+.log-list .log-line { 
+    padding: 0.25rem 0.25rem 0.25rem 0.5rem; 
+}
+
+.twitch-user { color: #a970ff; font-weight: 600; }
+.nami-reply { color: #63e2b7; }
+
+.context-box { 
+    white-space: pre-wrap; 
+    word-wrap: break-word; 
+}
+
+.mention-bg { 
+    background-color: rgba(169, 112, 255, 0.1); 
+    border-left: 3px solid #a970ff; 
+    border-radius: 4px; 
+}
+
+.highlight-word { 
+    color: #d8b4fe; 
+    font-weight: 600; 
+    background-color: rgba(169, 112, 255, 0.2); 
+    padding: 1px 4px; 
+    border-radius: 4px; 
+}
+
+.censored-reply { 
+    background-color: rgba(239, 68, 68, 0.2) !important; 
+    border-left: 3px solid #ef4444 !important; 
+    border-radius: 4px !important; 
+    padding: 0.25rem 0.5rem !important; 
+}
+
+.censored-indicator { 
+    color: #ef4444; 
+    font-weight: 600; 
+    font-size: 0.75rem; 
+    margin-left: 0.5rem; 
+}
+
+/* Summary styles */
+.summary-text {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #ffffff;
+    line-height: 1.5;
+}
+.summary-raw-context {
+    font-size: 0.75rem;
+    color: #aaaaaa;
+    margin-top: 1rem;
+    border-top: 1px dashed #444;
+    padding-top: 0.5rem;
+    white-space: pre-wrap;
+}
+.prediction-text {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #63e2b7; 
+    line-height: 1.5;
+}
+
+/* Mood Colors */
+.mood-Happy { color: #FCD34D; border-color: #FCD34D; }
+.mood-Annoyed { color: #F87171; border-color: #F87171; }
+.mood-Scared { color: #A78BFA; border-color: #A78BFA; }
+.mood-Neutral { color: #63e2b7; border-color: #63e2b7; }
+
+/* User Card */
+.user-card { 
+    background: #202020; 
+    padding: 10px; 
+    border-radius: 8px; 
+    border: 1px solid #444; 
+}
+.user-card h3 { 
+    font-size: 0.9rem; 
+    font-weight: 700; 
+    color: #fff; 
+}
+.user-badge { 
+    font-size: 0.7rem; 
+    padding: 2px 6px; 
+    border-radius: 4px; 
+    background: #444; 
+    color: #bbb; 
+}
+
+#interest-chart { 
+    position: absolute; 
+    top: 0; 
+    left: 0; 
+    width: 100%; 
+    height: 100%; 
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #1a1a1a; }
+::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
