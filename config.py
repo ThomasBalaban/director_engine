@@ -1,4 +1,4 @@
-# Save as: director_engine/config.py
+# director_engine/config.py
 from enum import Enum, auto
 
 class InputSource(Enum):
@@ -75,7 +75,7 @@ MEMORY_DECAY_RATE = 0.05
 MEMORY_RETRIEVAL_LIMIT = 5
 CURIOSITY_INTERVAL = 45.0 
 CALLBACK_INTERVAL = 60.0 
-COMPRESSION_INTERVAL = 30.0 # [CHANGED] Lowered to 30s for faster updates
+COMPRESSION_INTERVAL = 30.0 
 
 # --- Director Config ---
 DIRECTOR_PORT = 8002

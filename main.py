@@ -121,13 +121,15 @@ async def summary_ticker(store: ContextStore):
 
             # [FIX] Inject Narrative Log OR Fallback Summary
             if store.narrative_log:
-                last_story = store.narrative_log[-1]
-                memories_list.insert(0, {
-                    "source": "NARRATIVE_HISTORY",
-                    "text": f"Previously: {last_story}",
-                    "score": 1.0,
-                    "type": "narrative"
-                })
+                recent_history = list(reversed(store.narrative_log[-3:]))
+                
+                for i, story in enumerate(recent_history):
+                    memories_list.insert(i, {
+                        "source": "NARRATIVE_HISTORY",
+                        "text": f"Previously: {story}",
+                        "score": 1.0, # Always show at top
+                        "type": "narrative"
+                    })
             elif not memories_list and summary_data['summary']:
                 # If absolutely nothing else is in memory, show the current summary
                 # so the panel doesn't look broken.
