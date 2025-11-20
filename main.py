@@ -52,9 +52,10 @@ async def summary_ticker(store: ContextStore):
             # 1. Generate new summary/prediction/state
             await llm_analyst.generate_summary(store)
             
-            # 2. Update Adaptive Thresholds
+            # 2. Update Adaptive Thresholds & RL [REQ 6]
             chat_vel, energy_level = store.get_activity_metrics()
             new_threshold = adaptive_ctrl.update(chat_vel, energy_level)
+            adaptive_ctrl.process_feedback(store) # <--- CRITICAL RL HOOK
             
             # 3. Update Scene
             scene_manager.update_scene(store)
@@ -73,7 +74,8 @@ async def summary_ticker(store: ContextStore):
             # 5. Run Behavioral Systems
             behavior_engine.update_goal(store)
             
-            thought_text = behavior_engine.check_curiosity(store)
+            # [REQ 7] Curiosity now uses profile_manager for proactive topics
+            thought_text = behavior_engine.check_curiosity(store, profile_manager)
             if thought_text:
                 print(f"💡 [Curiosity] {thought_text}")
                 thought_event = store.add_event(
@@ -119,7 +121,7 @@ async def summary_ticker(store: ContextStore):
                 "type": "memory"
             } for m in smart_memories]
 
-            # [FIX] Inject Narrative Log OR Fallback Summary
+            # Inject Narrative Log OR Fallback Summary
             if store.narrative_log:
                 recent_history = list(reversed(store.narrative_log[-3:]))
                 
@@ -306,9 +308,8 @@ async def ingest_event(sid, payload: dict):
             bundle_event_created = True
 
     if not bundle_event_created:
-        # [NEW] ATTENTION COMPETITION LOGIC
+        # ATTENTION COMPETITION LOGIC
         # We ask the behavior engine: "Does this event deserve attention right now?"
-        # It will return the event if YES (and lock focus), or None if NO.
         attended_event = behavior_engine.direct_attention(store, [event])
         
         if attended_event:
@@ -322,7 +323,6 @@ async def ingest_event(sid, payload: dict):
                         event, store, profile_manager, handle_analysis_complete
                     ))
         else:
-            # If we are here, the event was ignored due to focus lock
             print(f"🛡️ [Attention] Blocked low-priority event: {event.source.name} (Score: {primary_score:.2f})")
 
 @sio.on("bot_reply")

@@ -20,7 +20,7 @@ class EventItem:
     metadata: Dict[str, Any]
     score: EventScore 
     memory_text: Optional[str] = None 
-    thread_id: Optional[str] = None # Multi-turn thread tracking
+    thread_id: Optional[str] = None 
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 @dataclass
@@ -35,7 +35,14 @@ class DebtItem:
     text: str
     timestamp: float
     topic: str
-    status: str = "unresolved" # unresolved, satisfied, expired
+    status: str = "unresolved" 
+
+@dataclass
+class BotAction:
+    timestamp: float
+    action_type: str # 'joke', 'question', 'roast', 'support'
+    text: str
+    outcome_score: float = 0.0 
 
 class ContextStore:
     def __init__(self):
@@ -43,8 +50,9 @@ class ContextStore:
         self.recent: List[EventItem] = []      
         self.background: List[EventItem] = []
         
-        # Semantic Compression Log
-        self.narrative_log: List[str] = []
+        # [REQ 10] Tiered History
+        self.narrative_log: List[str] = [] # Mid-term (last hour)
+        self.ancient_history_log: List[str] = [] # Long-term (compressed)
         
         self.all_memories: List[EventItem] = [] 
         self.lock = threading.Lock()
@@ -66,8 +74,17 @@ class ContextStore:
         
         # --- EMOTIONAL MOMENTUM ---
         self.sentiment_history: List[str] = []
-        self.emotional_momentum: str = "Stable" # Stable, Escalating_Positive, Escalating_Negative, Crash
+        self.emotional_momentum: str = "Stable"
         self.current_mood: str = DEFAULT_MOOD
+        
+        # --- [REQ 6] RL TRACKING ---
+        self.bot_action_log: List[BotAction] = []
+        self.action_weights: Dict[str, float] = {
+            "joke": 1.0, 
+            "question": 1.0, 
+            "roast": 1.0, 
+            "support": 1.0
+        }
         
         self.current_summary: str = "Just starting up."
         self.summary_raw_context: str = "Waiting for events..."
@@ -87,16 +104,41 @@ class ContextStore:
             self._manage_hierarchy_nolock() 
         return item
 
+    # --- [REQ 6] Bot Action Tracking ---
+    def log_bot_action(self, action_type: str, text: str):
+        with self.lock:
+            self.bot_action_log.append(BotAction(
+                timestamp=time.time(),
+                action_type=action_type,
+                text=text
+            ))
+            # Keep log small
+            if len(self.bot_action_log) > 20:
+                self.bot_action_log.pop(0)
+
+    def get_recent_bot_action(self, window: float = 30.0) -> Optional[BotAction]:
+        with self.lock:
+            if not self.bot_action_log: 
+                return None
+            last = self.bot_action_log[-1]
+            if time.time() - last.timestamp <= window:
+                return last
+            return None
+
+    def update_action_weight(self, action_type: str, delta: float):
+        """Adjusts the weight of an action type based on feedback."""
+        with self.lock:
+            current = self.action_weights.get(action_type, 1.0)
+            # Clamp between 0.5 and 2.0 to prevent runaway bias
+            self.action_weights[action_type] = max(0.5, min(2.0, current + delta))
+
     def add_debt(self, text: str, topic: str = "general"):
-        """Registers a question Nami asked that needs an answer."""
         with self.lock:
             self.conversation_debt.append(DebtItem(text=text, timestamp=time.time(), topic=topic))
             print(f"🧾 [Debt] Added: '{text}'")
 
     def resolve_debt(self, topic: str = None) -> Optional[DebtItem]:
-        """Marks a debt as resolved if relevant input comes in."""
         with self.lock:
-            # Simple resolution: pop the oldest unresolved debt
             if self.conversation_debt:
                 item = self.conversation_debt.pop(0)
                 print(f"🧾 [Debt] Resolved: '{item.text}'")
@@ -104,12 +146,16 @@ class ContextStore:
         return None
     
     def add_narrative_segment(self, text: str):
-        """Adds a compressed summary of past events to the permanent log."""
         with self.lock:
             self.narrative_log.append(text)
-            if len(self.narrative_log) > 50:
-                self.narrative_log.pop(0)
+            # Allow it to grow to triggers compression externally
             print(f"📜 [Context] Added narrative segment: {text[:50]}...")
+
+    # --- [REQ 10] Ancient History ---
+    def archive_ancient_history(self, summary_text: str):
+        with self.lock:
+            self.ancient_history_log.append(summary_text)
+            print(f"🏛️ [History] Archived ancient block: {summary_text[:50]}...")
 
     def promote_to_memory(self, event: EventItem, summary_text: str = None):
         with self.lock:
@@ -137,8 +183,7 @@ class ContextStore:
             else: self.current_mood = "Neutral"
 
     def set_active_user(self, profile: Dict[str, Any]):
-        with self.summary_lock:
-            self.active_user_profile = profile
+        with self.summary_lock: self.active_user_profile = profile
 
     def set_conversation_state(self, state: ConversationState):
         with self.summary_lock:
@@ -241,8 +286,7 @@ class ContextStore:
     def get_and_clear_pending_speech(self, max_age_seconds: float = 3.0) -> Optional[EventItem]:
         with self.pending_speech_lock:
             if not self.pending_speech_event: return None
-            now = time.time()
-            if (now - self.pending_speech_event.timestamp) <= max_age_seconds:
+            if (time.time() - self.pending_speech_event.timestamp) <= max_age_seconds:
                 evt = self.pending_speech_event
                 self.pending_speech_event = None
                 return evt

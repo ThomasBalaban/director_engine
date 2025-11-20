@@ -2,7 +2,8 @@
 import json
 import os
 import time
-from typing import Dict, Any, List
+import random
+from typing import Dict, Any, List, Optional
 from config import PROFILES_DIR, DEFAULT_RELATIONSHIP_TIER, DEFAULT_AFFINITY
 
 class UserProfileManager:
@@ -53,45 +54,14 @@ class UserProfileManager:
         return profile
     
     def _validate_fact(self, fact_text: str, username: str) -> bool:
-        """
-        Filters out garbage facts that are just meta-commentary or trivial.
-        """
         text = fact_text.lower().strip()
         username_lower = username.lower()
-        
-        # 1. Reject exact username match
-        if text == username_lower:
-            return False
-            
-        # 2. Reject phrases that just describe the user status
-        # "peepingotter is a new user", "peepingotter is a user"
-        trivial_phrases = [
-            f"{username_lower} is a new user",
-            f"{username_lower} is a user",
-            f"{username_lower} is a viewer",
-            "is a user who",
-            "is a new user",
-            "is a viewer"
-        ]
-        if any(phrase in text for phrase in trivial_phrases):
-            return False
-
-        # 3. Reject meta-commentary about the act of revealing
-        garbage_phrases = [
-            "revealed a new fact",
-            "user revealed",
-            "fact about themselves",
-            "extracted fact",
-            "user stated",
-            "mentioned that"
-        ]
-        if any(phrase in text for phrase in garbage_phrases):
-            return False
-            
-        # 4. Reject too short
-        if len(text) < 5:
-            return False
-            
+        if text == username_lower: return False
+        trivial_phrases = [f"{username_lower} is a new user", f"{username_lower} is a user", "is a viewer"]
+        if any(phrase in text for phrase in trivial_phrases): return False
+        garbage_phrases = ["revealed a new fact", "user revealed", "extracted fact"]
+        if any(phrase in text for phrase in garbage_phrases): return False
+        if len(text) < 5: return False
         return True
 
     def update_profile(self, username: str, updates: Dict[str, Any]):
@@ -101,17 +71,16 @@ class UserProfileManager:
         if 'new_facts' in updates and updates['new_facts']:
             for fact in updates['new_facts']:
                 fact = fact.strip()
-                
-                # [VALIDATION STEP]
                 if not self._validate_fact(fact, username):
-                    print(f"[Profiles] 🗑️ Rejected garbage fact: '{fact}'")
                     continue
 
                 if not any(f['content'] == fact for f in profile['facts']):
                     profile['facts'].append({
                         "content": fact,
                         "timestamp": time.time(),
-                        "category": "learned"
+                        "category": "learned",
+                        "usage_count": 0,      # [REQ 7] Track usage
+                        "last_used": 0.0
                     })
                     modified = True
                     print(f"[Profiles] ✅ Added valid fact for {username}: {fact}")
@@ -130,6 +99,38 @@ class UserProfileManager:
             self._save_json(self._get_filepath(username), profile)
             return profile
         return profile
+
+    # --- [REQ 7] Proactive Topic Suggestion ---
+    def get_under_discussed_fact(self, username: str) -> Optional[str]:
+        """Returns a fact that hasn't been discussed much, prioritizing variety."""
+        profile = self.get_profile(username)
+        facts = profile.get('facts', [])
+        if not facts: return None
+        
+        # Filter for facts not used recently (last 1 hour)
+        now = time.time()
+        available = [f for f in facts if (now - f.get('last_used', 0)) > 3600]
+        
+        if not available: return None
+        
+        # Sort by usage count (lowest first)
+        available.sort(key=lambda x: x.get('usage_count', 0))
+        
+        # Pick from the top 3 least used
+        candidates = available[:3]
+        selected = random.choice(candidates)
+        
+        return selected['content']
+
+    def mark_fact_used(self, username: str, fact_content: str):
+        """Increments usage count for a fact."""
+        profile = self.get_profile(username)
+        for fact in profile['facts']:
+            if fact['content'] == fact_content:
+                fact['usage_count'] = fact.get('usage_count', 0) + 1
+                fact['last_used'] = time.time()
+                self._save_json(self._get_filepath(username), profile)
+                return
 
     def _save_json(self, filepath: str, data: Dict[str, Any]):
         try:

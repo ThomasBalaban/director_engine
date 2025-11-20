@@ -14,33 +14,26 @@ class CorrelationEngine:
     def _calculate_momentum(self, history: List[str]) -> str:
         if len(history) < 3: return "Stable"
         
-        # Map sentiments to values
         val_map = {
-            "excited": 2, "happy": 1, "positive": 1, "neutral": 0,
+            "excited": 2, "happy": 1, "positive": 1, "neutral": 0, 
             "annoyed": -1, "frustrated": -2, "angry": -3, "scared": -2
         }
         
         values = [val_map.get(h, 0) for h in history[-5:]]
         if not values: return "Stable"
         
-        # Simple slope check
-        start = values[0]
-        end = values[-1]
-        delta = end - start
-        
+        delta = values[-1] - values[0]
         if delta >= 2: return "Escalating_Positive"
         if delta <= -2: return "Escalating_Negative"
         return "Stable"
         
     def correlate(self, store: ContextStore) -> List[Dict[str, Any]]:
         now = time.time()
-        
-        # 1. Update Momentum
         store.emotional_momentum = self._calculate_momentum(store.sentiment_history)
         
         if now - self.last_pattern_time < self.cooldown: return []
-            
         patterns = []
+        
         layers = store.get_all_events_for_summary()
         events = layers['immediate'] + layers['recent']
         
@@ -50,85 +43,72 @@ class CorrelationEngine:
         chat = [e for e in events if e.source in [InputSource.TWITCH_CHAT, InputSource.TWITCH_MENTION]]
         speech = [e for e in events if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]]
 
-        # Momentum Pattern
+        # Momentum
         if store.emotional_momentum == "Escalating_Negative":
              patterns.append({
-                "text": "Warning: Mood is deteriorating rapidly. Intervention needed.",
-                "score": EventScore(interestingness=0.9, urgency=0.8, emotional_intensity=0.9),
-                "metadata": {"type": "pattern_momentum_neg"}
-            })
+                 "text": "Warning: Mood deteriorating.", 
+                 "score": EventScore(0.9, 0.8, 0.9, 0.0, 0.0), 
+                 "metadata": {"type": "pattern_momentum_neg"}
+             })
 
-        # 1. Meme Moment
+        # Meme Moment
         if visuals and len(chat) >= 4:
             best_vis = max(visuals, key=lambda x: x.score.interestingness)
             if best_vis.score.interestingness > 0.6:
                 patterns.append({
-                    "text": f"Meme Moment: Chat is reacting heavily to visual '{best_vis.text}'",
-                    "score": EventScore(interestingness=0.95, conversational_value=1.0, urgency=0.6),
+                    "text": f"Meme Moment: Chat reacting to '{best_vis.text}'", 
+                    "score": EventScore(0.95, 0.6, 1.0, 0.0, 0.0), 
                     "metadata": {"type": "pattern_meme", "visual_ref": best_vis.text}
                 })
 
-        # 2. Tilt Detection
+        # Tilt
         tilt_keywords = ["damn", "shit", "fuck", "no", "why", "stupid", "impossible", "dead", "died", "trash"]
         recent_frustration = sum(1 for s in speech if any(k in s.text.lower() for k in tilt_keywords) or s.metadata.get("sentiment") in ["frustrated", "angry"])
         
         if recent_frustration >= 1: self.tilt_level = min(1.0, self.tilt_level + 0.25)
         else: self.tilt_level = max(0.0, self.tilt_level - 0.05)
-            
+        
         if self.tilt_level > 0.6:
             patterns.append({
-                "text": f"Tilt Warning: User seems frustrated (Tilt Level {int(self.tilt_level * 100)}%).",
-                "score": EventScore(interestingness=0.8, emotional_intensity=0.9, urgency=0.5),
+                "text": f"Tilt Warning: Level {int(self.tilt_level * 100)}%", 
+                "score": EventScore(0.8, 0.5, 0.9, 0.0, 0.0), 
                 "metadata": {"type": "pattern_tilt", "level": self.tilt_level}
             })
 
-        # 3. Backseating
-        backseat_keywords = ["try", "use", "equip", "go left", "go right", "missed", "you need", "press"]
-        backseat_chat = [c for c in chat if any(k in c.text.lower() for k in backseat_keywords)]
-        user_confused = any(s.metadata.get("sentiment") == "confused" or "?" in s.text for s in speech)
-        
-        if len(backseat_chat) >= 2 and user_confused:
-            patterns.append({
-                "text": "Backseating Detected: Chat is giving advice while user is confused.",
-                "score": EventScore(interestingness=0.7, conversational_value=0.9, urgency=0.4),
-                "metadata": {"type": "pattern_backseating"}
-            })
-
-        # 4. Victory
+        # Victory
         victory_keywords = ["yes", "boom", "let's go", "lets go", "finally", "did it", "won", "beat"]
         clutch_speech = [s for s in speech if any(k in s.text.lower() for k in victory_keywords)]
         if any(s.score.emotional_intensity > 0.7 and s.metadata.get("sentiment") in ["excited", "positive"] for s in clutch_speech):
             patterns.append({
-                "text": "Victory Moment: High energy positive reaction detected.",
-                "score": EventScore(interestingness=0.9, emotional_intensity=1.0, urgency=0.8),
+                "text": "Victory Moment!", 
+                "score": EventScore(0.9, 0.8, 1.0, 0.0, 0.0), 
                 "metadata": {"type": "pattern_victory"}
             })
 
-        # 5. Jumpscare
-        scare_speech = [s for s in speech if s.metadata.get("sentiment") == "scared" or s.score.urgency > 0.85]
-        if scare_speech:
-            patterns.append({
-                "text": "Jumpscare/Panic: Sudden fear response detected.",
-                "score": EventScore(interestingness=0.85, emotional_intensity=1.0, urgency=0.9),
-                "metadata": {"type": "pattern_scare"}
-            })
-
-        # 6. Silence Profiling
+        # --- [REQ 8] Enhanced Silence Classification ---
         if not layers['immediate']: # Silence in last 10s
-            # Check for Technical Silence (Loading screens)
+            # 1. Technical Silence (Loading/Menus)
             last_vis = layers['recent'][-1] if layers['recent'] and layers['recent'][-1].source == InputSource.VISUAL_CHANGE else None
             if last_vis and any(k in last_vis.text.lower() for k in ["loading", "menu", "pause", "saving"]):
-                pass
+                pass # Ignore technical silence
+            
+            # 2. Suspense (Horror/Scared context)
+            elif store.current_mood == "Scared" or store.emotional_momentum == "Escalating_Negative":
+                 pass # Ignore suspenseful silence (don't break tension)
+
+            # 3. Contemplative (User thinking/Menuing without frustration)
+            elif store.current_mood == "Neutral" and self.tilt_level < 0.2:
+                 pass # User is just chilling/thinking
+
+            # 4. Awkward/Dead Air (Nothing happening, no mood reason for it)
             else:
                 avg_score = sum(e.score.interestingness for e in layers['recent']) / len(layers['recent']) if layers['recent'] else 0
                 if avg_score < 0.25 and len(layers['recent']) < 3:
                      patterns.append({
-                        "text": "Engagement Void: Awkward silence detected. Good time to initiate topic.",
+                        "text": "Engagement Void: Awkward silence detected.",
                         "score": EventScore(interestingness=0.5, urgency=0.7, conversational_value=0.9), 
                         "metadata": {"type": "pattern_void"}
                     })
 
-        if patterns:
-            self.last_pattern_time = now
-            
+        if patterns: self.last_pattern_time = now
         return patterns
