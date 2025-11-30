@@ -18,7 +18,6 @@ class ContextCompressor:
             await self._compress_recent(store)
 
         # 2. [REQ 10] Ancient History Compression (Narrative Log -> Ancient History Log)
-        # Run this less frequently, e.g., every 5 minutes
         if now - self.last_ancient_compression_time >= 300: 
             self.last_ancient_compression_time = now
             await self._compress_ancient(store)
@@ -32,12 +31,24 @@ class ContextCompressor:
         if not background_events: return
             
         context_text = "\n".join([f"- [{e.source.name}] {e.text}" for e in background_events])
-        prompt = f"Summarize these stream events into one narrative sentence:\n{context_text}\nNarrative Sentence:"
+        
+        # --- IMPROVED PROMPT ---
+        prompt = (
+            f"Review these events:\n{context_text}\n\n"
+            f"Write EXACTLY ONE narrative sentence summarizing what happened. "
+            f"Do NOT start with 'Here is a summary' or 'The user'. "
+            f"Just state the action directly (e.g. 'Watched a video about X while chatting about Y')."
+        )
 
         try:
             client = ollama.AsyncClient()
             response = await client.generate(model=OLLAMA_MODEL, prompt=prompt)
             narrative = response['response'].strip()
+            
+            # Post-processing cleanup just in case
+            if narrative.lower().startswith("here is"):
+                narrative = narrative.split(":", 1)[-1].strip()
+                
             if narrative:
                 store.add_narrative_segment(narrative)
         except Exception as e:
@@ -48,17 +59,18 @@ class ContextCompressor:
         Takes the oldest chunk of the narrative log and compresses it into a single 'Ancient' summary.
         """
         with store.lock:
-            # Trigger only if we have a significant backlog (e.g., > 10 segments)
             if len(store.narrative_log) < 10:
                 return
 
-            # Take the oldest 5 segments
             chunk_to_compress = store.narrative_log[:5]
             
         print(f"📚 [Compressor] Compressing {len(chunk_to_compress)} narrative segments into Ancient History...")
         
         context_text = "\n".join([f"- {seg}" for seg in chunk_to_compress])
-        prompt = f"Condense these 5 events into a single, high-level historical summary sentence:\n{context_text}\nSummary:"
+        prompt = (
+            f"Events:\n{context_text}\n\n"
+            f"Condense these into a single historical fact. No intro text."
+        )
 
         try:
             client = ollama.AsyncClient()
@@ -67,7 +79,6 @@ class ContextCompressor:
             
             if ancient_summary:
                 with store.lock:
-                    # Remove the processed segments
                     store.narrative_log = store.narrative_log[5:]
                     store.archive_ancient_history(ancient_summary)
         except Exception as e:

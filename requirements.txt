@@ -5,3 +5,6 @@ pydantic
 ollama
 python-socketio
 aiofiles
+sentence-transformers
+torch
+numpy

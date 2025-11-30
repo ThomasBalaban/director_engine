@@ -24,6 +24,7 @@ from behavior_engine import BehaviorEngine
 from memory_ops import MemoryOptimizer
 from context_compression import ContextCompressor
 from scene_manager import SceneManager
+# --- PREVIOUS UPGRADES ---
 from decision_engine import DecisionEngine
 from prompt_constructor import PromptConstructor
 
@@ -38,7 +39,7 @@ adaptive_ctrl = AdaptiveController()
 correlation_engine = CorrelationEngine()
 energy_system = EnergySystem()
 behavior_engine = BehaviorEngine()
-memory_optimizer = MemoryOptimizer()
+memory_optimizer = MemoryOptimizer() # Now uses Semantic Search internally
 context_compressor = ContextCompressor()
 scene_manager = SceneManager()
 decision_engine = DecisionEngine()
@@ -79,11 +80,11 @@ async def summary_ticker(store: ContextStore):
             # 5. Run Behavioral Systems
             behavior_engine.update_goal(store)
             
-            # 6. Generate Directive
+            # 6. Generate Directive (Decision Engine)
             directive = decision_engine.generate_directive(
                 store, behavior_engine, adaptive_ctrl, energy_system
             )
-            store.set_directive(directive)
+            store.set_directive(directive) # Store object directly
             
             # 7. Curiosity & Callbacks
             thought_text = behavior_engine.check_curiosity(store, profile_manager)
@@ -120,10 +121,23 @@ async def summary_ticker(store: ContextStore):
             memory_optimizer.decay_memories(store)
             await context_compressor.run_compression_cycle(store)
 
-            # 9. Gather Data for UI
+            # 9. Gather Data for UI & Retrieval
             summary_data = store.get_summary_data()
-            active_topics = summary_data.get('topics', [])
-            smart_memories = memory_optimizer.retrieve_relevant_memories(store, active_topics)
+            
+            # --- SEMANTIC RETRIEVAL PREP ---
+            # Use the Summary as the search query because it describes "What is happening now"
+            current_context_query = summary_data.get('summary', "")
+            if not current_context_query or len(current_context_query) < 5:
+                # Fallback to topics if summary is empty
+                active_topics = summary_data.get('topics', [])
+                current_context_query = " ".join(active_topics)
+
+            # Retrieve memories using the query string (Semantic Search)
+            smart_memories = memory_optimizer.retrieve_relevant_memories(
+                store, 
+                current_context_query,
+                limit=5
+            )
             
             memories_list = [{
                 "source": m.source.name, 
@@ -331,20 +345,31 @@ async def get_summary():
     summary, _ = store.get_summary()
     return summary
 
-# --- UPDATE: Returns formatted prompt via PromptConstructor ---
+# --- BREADCRUMBS ENDPOINT ---
+# This is what Nami calls to get her context.
 @app.get("/breadcrumbs")
 async def get_breadcrumbs(count: int = 3):
     summary_data = store.get_summary_data()
-    active_topics = summary_data.get('topics', [])
     
-    smart_memories = memory_optimizer.retrieve_relevant_memories(store, active_topics)
+    # 1. Semantic Search Logic
+    current_context_query = summary_data.get('summary', "")
+    if not current_context_query or len(current_context_query) < 5:
+        active_topics = summary_data.get('topics', [])
+        current_context_query = " ".join(active_topics)
+    
+    smart_memories = memory_optimizer.retrieve_relevant_memories(
+        store, 
+        current_context_query, 
+        limit=5
+    )
+    
     directive_obj = summary_data.get('directive')
     
-    # This is the magic line that replaces all the old logic
-    formatted_context = prompt_constructor.construct_context_block(
+    # 2. Prompt Construction (Async call to Gemini if enabled)
+    formatted_context = await prompt_constructor.construct_context_block(
         store, 
         directive_obj,
-        smart_memories
+        smart_memories[:3] # We only use top 3 to keep prompt size reasonable
     )
     
     return {"formatted_context": formatted_context}

@@ -1,5 +1,12 @@
-# director_engine/config.py
+# Save as: director_engine/config.py
 from enum import Enum, auto
+
+# --- NEW: Import API Key ---
+try:
+    from private_key import GEMINI_API_KEY
+except ImportError:
+    GEMINI_API_KEY = None
+    print("⚠️ Warning: private_key.py not found. Visual summarization will be disabled.")
 
 class InputSource(Enum):
     DIRECT_MICROPHONE = auto()

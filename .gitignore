@@ -1,2 +1,3 @@
 __pycache__
 profiles/**
+private_key.py
