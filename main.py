@@ -1,16 +1,16 @@
 # Save as: director_engine/main.py
-import uvicorn # type: ignore
+import uvicorn
 import asyncio
 import threading
 import webbrowser
 from pathlib import Path
 
-from fastapi import FastAPI # type: ignore
-from fastapi.staticfiles import StaticFiles # type: ignore
-from fastapi.responses import FileResponse, PlainTextResponse # type: ignore
-from pydantic import BaseModel, Field # type: ignore
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, PlainTextResponse
+from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
-import socketio # type: ignore
+import socketio
 
 import config
 import llm_analyst
@@ -24,12 +24,13 @@ from behavior_engine import BehaviorEngine
 from memory_ops import MemoryOptimizer
 from context_compression import ContextCompressor
 from scene_manager import SceneManager
-# --- PREVIOUS UPGRADES ---
 from decision_engine import DecisionEngine
 from prompt_constructor import PromptConstructor
+from sensor_bridge import SensorBridge  # <--- NEW IMPORT
 
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
+sensor_bridge_task: Optional[asyncio.Task] = None # <--- NEW TASK
 server_ready: bool = False
 
 # --- INIT ENGINES ---
@@ -39,11 +40,84 @@ adaptive_ctrl = AdaptiveController()
 correlation_engine = CorrelationEngine()
 energy_system = EnergySystem()
 behavior_engine = BehaviorEngine()
-memory_optimizer = MemoryOptimizer() # Now uses Semantic Search internally
+memory_optimizer = MemoryOptimizer()
 context_compressor = ContextCompressor()
 scene_manager = SceneManager()
 decision_engine = DecisionEngine()
 prompt_constructor = PromptConstructor()
+
+# --- SHARED EVENT PROCESSOR ---
+# This is the core logic that handles ALL inputs (SocketIO or Sensor Bridge)
+async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
+    # 1. UI Emit (Raw Data)
+    if source == config.InputSource.VISUAL_CHANGE:
+        emit_vision_context(text)
+    elif source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
+        emit_spoken_word_context(text)
+    elif source == config.InputSource.AMBIENT_AUDIO:
+        emit_audio_context(text)
+    elif source in [config.InputSource.TWITCH_CHAT, config.InputSource.TWITCH_MENTION]:
+        emit_twitch_message(username or "Chat", text)
+    
+    # 2. User Profile Update
+    if username:
+        profile = profile_manager.get_profile(username)
+        store.set_active_user(profile)
+
+    # 3. Handle Bot Self-Reply (Echo)
+    if source == config.InputSource.BOT_TWITCH_REPLY:
+        zero_score = EventScore()
+        store.add_event(source, text, metadata, zero_score)
+        emit_twitch_message(username or "Nami", text)
+        behavior_engine.register_bot_action(store, text)
+        energy_system.spend(config.ENERGY_COST_REPLY)
+        return
+    
+    # 4. Scoring & Storage
+    heuristic_score: EventScore = calculate_event_score(source, metadata, config.SOURCE_WEIGHTS)
+    event = store.add_event(source, text, metadata, heuristic_score)
+    emit_event_scored(event)
+    
+    # 5. Debt Check (Did user answer a question?)
+    if source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
+         behavior_engine.check_debt_resolution(store, text)
+
+    # 6. Event Bundling (Linking Speech to Visuals)
+    bundle_event_created = False
+    primary_score = heuristic_score.interestingness
+
+    if source in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.6:
+        store.set_pending_speech(event)
+    elif source not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.7:
+        # If we see something interesting right after hearing something, link them
+        pending_speech = store.get_and_clear_pending_speech(max_age_seconds=3.0)
+        if pending_speech:
+            print(f"✅ EVENT BUNDLE: {pending_speech.text} + {event.text}")
+            bundle_text = f"User reacted with '{pending_speech.text}' to: '{event.text}'"
+            bundle_metadata = {**metadata, "is_bundle": True, "speech_text": pending_speech.text, "event_text": event.text}
+            bundle_score = EventScore(interestingness=1.0, urgency=0.9, conversational_value=1.0, topic_relevance=1.0)
+            bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, bundle_score)
+            emit_event_scored(bundle_event)
+            # Immediate Analysis on Bundles
+            asyncio.create_task(llm_analyst.analyze_and_update_event(
+                bundle_event, store, profile_manager, handle_analysis_complete
+            ))
+            bundle_event_created = True
+
+    # 7. Attention & Analysis Trigger
+    if not bundle_event_created:
+        attended_event = behavior_engine.direct_attention(store, [event])
+        if attended_event:
+            # Analyze if high score OR if urgent enough to break silence
+            if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
+                asyncio.create_task(llm_analyst.analyze_and_update_event(
+                    event, store, profile_manager, handle_analysis_complete
+                ))
+            elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
+                 if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
+                     asyncio.create_task(llm_analyst.analyze_and_update_event(
+                        event, store, profile_manager, handle_analysis_complete
+                    ))
 
 async def summary_ticker(store: ContextStore):
     global server_ready
@@ -55,18 +129,14 @@ async def summary_ticker(store: ContextStore):
     
     while True:
         try:
-            # 1. Generate new summary/prediction/state
             await llm_analyst.generate_summary(store)
             
-            # 2. Update Adaptive Thresholds & RL
             chat_vel, energy_level = store.get_activity_metrics()
             new_threshold = adaptive_ctrl.update(chat_vel, energy_level)
             adaptive_ctrl.process_feedback(store) 
             
-            # 3. Update Scene
             scene_manager.update_scene(store)
             
-            # 4. Run Cross-Event Correlation
             patterns = correlation_engine.correlate(store)
             for pat in patterns:
                 sys_event = store.add_event(
@@ -77,16 +147,14 @@ async def summary_ticker(store: ContextStore):
                 )
                 emit_event_scored(sys_event)
 
-            # 5. Run Behavioral Systems
             behavior_engine.update_goal(store)
             
-            # 6. Generate Directive (Decision Engine)
             directive = decision_engine.generate_directive(
                 store, behavior_engine, adaptive_ctrl, energy_system
             )
-            store.set_directive(directive) # Store object directly
+            store.set_directive(directive) 
             
-            # 7. Curiosity & Callbacks
+            # Curiosity & Callbacks (Bot Thoughts)
             thought_text = behavior_engine.check_curiosity(store, profile_manager)
             if thought_text:
                 print(f"💡 [Curiosity] {thought_text}")
@@ -117,22 +185,16 @@ async def summary_ticker(store: ContextStore):
                         cb_event, store, profile_manager, handle_analysis_complete
                     ))
             
-            # 8. Memory & Compression
             memory_optimizer.decay_memories(store)
             await context_compressor.run_compression_cycle(store)
 
-            # 9. Gather Data for UI & Retrieval
             summary_data = store.get_summary_data()
             
-            # --- SEMANTIC RETRIEVAL PREP ---
-            # Use the Summary as the search query because it describes "What is happening now"
             current_context_query = summary_data.get('summary', "")
             if not current_context_query or len(current_context_query) < 5:
-                # Fallback to topics if summary is empty
                 active_topics = summary_data.get('topics', [])
                 current_context_query = " ".join(active_topics)
 
-            # Retrieve memories using the query string (Semantic Search)
             smart_memories = memory_optimizer.retrieve_relevant_memories(
                 store, 
                 current_context_query,
@@ -178,7 +240,6 @@ async def summary_ticker(store: ContextStore):
                 }
             )
 
-            # 10. Stale Analysis
             stale_event = store.get_stale_event_for_analysis()
             if stale_event:
                 asyncio.create_task(llm_analyst.analyze_and_update_event(
@@ -263,6 +324,7 @@ def emit_event_scored(event: EventItem):
 def handle_analysis_complete(event: EventItem):
     emit_event_scored(event)
 
+# --- SOCKET.IO HANDLER ---
 @sio.on("event")
 async def ingest_event(sid, payload: dict):
     try:
@@ -271,66 +333,14 @@ async def ingest_event(sid, payload: dict):
     except Exception as e:
         print(f"Invalid event payload: {e}")
         return
-
-    if source_enum == config.InputSource.VISUAL_CHANGE:
-        emit_vision_context(payload_model.text)
-    elif source_enum in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
-        emit_spoken_word_context(payload_model.text)
-    elif source_enum == config.InputSource.AMBIENT_AUDIO:
-        emit_audio_context(payload_model.text)
-    elif source_enum in [config.InputSource.TWITCH_CHAT, config.InputSource.TWITCH_MENTION]:
-        emit_twitch_message(payload_model.username or "Chat", payload_model.text)
     
-    if payload_model.username:
-        profile = profile_manager.get_profile(payload_model.username)
-        store.set_active_user(profile)
-
-    if source_enum == config.InputSource.BOT_TWITCH_REPLY:
-        zero_score = EventScore()
-        store.add_event(source_enum, payload_model.text, payload_model.metadata, zero_score)
-        emit_twitch_message(payload_model.username or "Nami", payload_model.text)
-        behavior_engine.register_bot_action(store, payload_model.text)
-        energy_system.spend(config.ENERGY_COST_REPLY)
-        return
-    
-    heuristic_score: EventScore = calculate_event_score(source_enum, payload_model.metadata, config.SOURCE_WEIGHTS)
-    event = store.add_event(source_enum, payload_model.text, payload_model.metadata, heuristic_score)
-    emit_event_scored(event)
-    
-    if source_enum in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
-         behavior_engine.check_debt_resolution(store, payload_model.text)
-
-    bundle_event_created = False
-    primary_score = heuristic_score.interestingness
-
-    if source_enum in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.6:
-        store.set_pending_speech(event)
-    elif source_enum not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.7:
-        pending_speech = store.get_and_clear_pending_speech(max_age_seconds=3.0)
-        if pending_speech:
-            print(f"✅ EVENT BUNDLE: {pending_speech.text} + {event.text}")
-            bundle_text = f"User reacted with '{pending_speech.text}' to: '{event.text}'"
-            bundle_metadata = {**event.metadata, "is_bundle": True, "speech_text": pending_speech.text, "event_text": event.text}
-            bundle_score = EventScore(interestingness=1.0, urgency=0.9, conversational_value=1.0, topic_relevance=1.0)
-            bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, bundle_score)
-            emit_event_scored(bundle_event)
-            asyncio.create_task(llm_analyst.analyze_and_update_event(
-                bundle_event, store, profile_manager, handle_analysis_complete
-            ))
-            bundle_event_created = True
-
-    if not bundle_event_created:
-        attended_event = behavior_engine.direct_attention(store, [event])
-        if attended_event:
-            if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
-                asyncio.create_task(llm_analyst.analyze_and_update_event(
-                    event, store, profile_manager, handle_analysis_complete
-                ))
-            elif heuristic_score.urgency >= adaptive_ctrl.current_threshold:
-                 if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
-                     asyncio.create_task(llm_analyst.analyze_and_update_event(
-                        event, store, profile_manager, handle_analysis_complete
-                    ))
+    # Use shared processor
+    await process_engine_event(
+        source_enum, 
+        payload_model.text, 
+        payload_model.metadata, 
+        payload_model.username
+    )
 
 @sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
@@ -345,13 +355,10 @@ async def get_summary():
     summary, _ = store.get_summary()
     return summary
 
-# --- BREADCRUMBS ENDPOINT ---
-# This is what Nami calls to get her context.
 @app.get("/breadcrumbs")
 async def get_breadcrumbs(count: int = 3):
     summary_data = store.get_summary_data()
     
-    # 1. Semantic Search Logic
     current_context_query = summary_data.get('summary', "")
     if not current_context_query or len(current_context_query) < 5:
         active_topics = summary_data.get('topics', [])
@@ -365,11 +372,10 @@ async def get_breadcrumbs(count: int = 3):
     
     directive_obj = summary_data.get('directive')
     
-    # 2. Prompt Construction (Async call to Gemini if enabled)
     formatted_context = await prompt_constructor.construct_context_block(
         store, 
         directive_obj,
-        smart_memories[:3] # We only use top 3 to keep prompt size reasonable
+        smart_memories[:3] 
     )
     
     return {"formatted_context": formatted_context}
@@ -388,7 +394,7 @@ def open_browser():
     except: pass
 
 def run_server():
-    global ui_event_loop, summary_ticker_task, server_ready
+    global ui_event_loop, summary_ticker_task, server_ready, sensor_bridge_task
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     ui_event_loop = loop
@@ -396,7 +402,13 @@ def run_server():
     
     loop.run_until_complete(llm_analyst.create_http_client())
     
+    # 1. Start Summary Ticker
     summary_ticker_task = loop.create_task(summary_ticker(store))
+    
+    # 2. Start Sensor Bridge (Connect to Vision App)
+    sensor_bridge = SensorBridge(event_callback=process_engine_event)
+    sensor_bridge_task = loop.create_task(sensor_bridge.run())
+    
     server_ready = True
     print("✅ Director Engine is READY")
     
@@ -412,8 +424,8 @@ def run_server():
         server_ready = False
         if summary_ticker_task:
             summary_ticker_task.cancel()
-            try: loop.run_until_complete(summary_ticker_task)
-            except: pass
+        if sensor_bridge_task:
+            sensor_bridge_task.cancel()
         loop.run_until_complete(llm_analyst.close_http_client())
         loop.close()
 
