@@ -25,6 +25,11 @@ class UserProfileManager:
                 with open(filepath, 'r', encoding='utf-8') as f:
                     profile = json.load(f)
                     profile['last_seen'] = time.time()
+                    
+                    # Backwards compatibility: Ensure role exists if loading old profile
+                    if 'role' not in profile:
+                        profile['role'] = "handler" if username.lower() == "peepingotter" else "viewer"
+                        
                     self._save_json(filepath, profile)
                     return profile
             except Exception as e:
@@ -36,9 +41,15 @@ class UserProfileManager:
     def _create_default_profile(self, username: str) -> Dict[str, Any]:
         print(f"[Profiles] Creating new profile for: {username}")
         now = time.time()
+        
+        # --- NEURO-FICATION: Identify the Handler ---
+        # The 'Handler' is the owner/creator. They get bullied more.
+        role = "handler" if username.lower() == "peepingotter" else "viewer"
+        
         profile = {
             "username": username,
             "nickname": username,
+            "role": role,  # New Field
             "is_adult": True, 
             "created_at": now,
             "last_seen": now,
@@ -79,7 +90,7 @@ class UserProfileManager:
                         "content": fact,
                         "timestamp": time.time(),
                         "category": "learned",
-                        "usage_count": 0,      # [REQ 7] Track usage
+                        "usage_count": 0,      # Track usage for variety
                         "last_used": 0.0
                     })
                     modified = True
@@ -100,7 +111,7 @@ class UserProfileManager:
             return profile
         return profile
 
-    # --- [REQ 7] Proactive Topic Suggestion ---
+    # --- Proactive Topic Suggestion ---
     def get_under_discussed_fact(self, username: str) -> Optional[str]:
         """Returns a fact that hasn't been discussed much, prioritizing variety."""
         profile = self.get_profile(username)

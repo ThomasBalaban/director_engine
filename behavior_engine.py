@@ -1,11 +1,13 @@
 # Save as: director_engine/behavior_engine.py
 import time
 import random
+import asyncio
 from typing import List, Optional
-from config import BotGoal, InputSource, ConversationState, CURIOSITY_INTERVAL, CALLBACK_INTERVAL
+from config import BotGoal, InputSource, ConversationState, FlowState, CURIOSITY_INTERVAL, CALLBACK_INTERVAL
 from context_store import ContextStore, EventItem
 from scoring import EventScore
 from user_profile_manager import UserProfileManager
+import llm_analyst 
 
 class BehaviorEngine:
     def __init__(self):
@@ -83,34 +85,44 @@ class BehaviorEngine:
                 return f"Wait, you never told me: {debt.text}"
         return None
 
-    # --- [REQ 7] Proactive Topic Suggestion ---
-    def check_curiosity(self, store: ContextStore, profile_manager: UserProfileManager) -> Optional[str]:
+    # --- [NEURO-FICATION: Internal Monologue] ---
+    async def check_internal_monologue(self, store: ContextStore) -> Optional[str]:
+        """
+        Replaces the old 'Curiosity' check.
+        If Dead Air is detected, generates a 'Shower Thought' or 'Conspiracy'
+        instead of asking a helpful question.
+        """
         now = time.time()
         if now - self.last_curiosity_check < CURIOSITY_INTERVAL: return None
-        self.last_curiosity_check = now
         
-        if store.current_conversation_state not in [ConversationState.IDLE, ConversationState.ENGAGED]:
+        # Neuro Logic: If flow is DEAD_AIR or IDLE with low velocity -> Ramble
+        chat_vel, _ = store.get_activity_metrics()
+        
+        should_ramble = (
+            store.current_flow == FlowState.DEAD_AIR or 
+            (store.current_conversation_state == ConversationState.IDLE and chat_vel < 1.0)
+        )
+        
+        if not should_ramble:
             return None
             
-        user = store.active_user_profile
-        if not user: return None
+        self.last_curiosity_check = now
         
-        # 1. Try to revive an old topic
-        fact = profile_manager.get_under_discussed_fact(user['username'])
-        if fact:
-            print(f"💡 [Curiosity] Reviving topic: {fact}")
-            profile_manager.mark_fact_used(user['username'], fact)
-            return f"Hey, remember when you mentioned '{fact}'? How's that going?"
+        # Determine topic for the ramble
+        topic = "the current situation"
+        if store.current_topics:
+            topic = random.choice(store.current_topics)
+        elif store.current_entities:
+            topic = f"the {random.choice(store.current_entities)}"
+            
+        print(f"💭 [Monologue] Dead air detected. Generating thought about: {topic}")
+        
+        # Call LLM to generate the thought text
+        thought = await llm_analyst.generate_thought(f"A weird theory about {topic}")
+        return thought
 
-        # 2. Fallback to generic discovery
-        questions = []
-        if len(user['facts']) < 3:
-            questions.append(f"I don't know much about {user['username']}. I should ask what they do for fun.")
-        else:
-             questions.append("I wonder what games they actually like?")
-        
-        if questions: return random.choice(questions)
-        return None
+    # Alias for backwards compatibility if needed, but we should call check_internal_monologue directly
+    check_curiosity = check_internal_monologue
 
     def check_callbacks(self, store: ContextStore) -> Optional[str]:
         now = time.time()

@@ -1,8 +1,8 @@
 # Save as: director_engine/decision_engine.py
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any
-from config import BotGoal, ConversationState, FlowState
-from context_store import ContextStore
+from config import BotGoal, ConversationState, FlowState, InputSource
+from context_store import ContextStore, EventItem
 from behavior_engine import BehaviorEngine
 from adaptive_controller import AdaptiveController
 from energy_system import EnergySystem
@@ -74,9 +74,32 @@ class DecisionEngine:
         return "Casual, Sarcastic, Witty"
 
     def _calculate_objective_and_action(self, store: ContextStore, behavior: BehaviorEngine) -> tuple[str, str]:
+        # --- NEURO-FICATION: Handler Dynamic ---
+        # Check if the "Handler" (Creator) is the active user
+        user_role = "viewer"
+        if store.active_user_profile:
+            user_role = store.active_user_profile.get("role", "viewer")
+
+        # --- Skill Issue / Roast Logic ---
+        # Check for specific patterns in immediate events
+        recent_patterns = [e for e in store.immediate if e.source == InputSource.SYSTEM_PATTERN]
+        for pat in recent_patterns:
+            if pat.metadata.get("type") == "skill_issue":
+                return "Mock Failure", "Laugh at the handler's incompetence. Do not offer help. Say 'Skill Issue'."
+            if pat.metadata.get("type") == "fixation":
+                entity = pat.metadata.get("entity", "thing")
+                return "Visual Fixation", f"Obsess over the '{entity}'. Ask why it keeps appearing."
+
         goal = behavior.current_goal
         state = store.current_conversation_state
         
+        # Special Logic for Handler interactions
+        if user_role == "handler":
+            if store.current_mood in ["Annoyed", "Bored"]:
+                return "Deflect Blame", "Gaslight the handler, complain about the setup, or blame them for lag."
+            elif store.current_flow == FlowState.DEAD_AIR:
+                return "Provoke", "Roast the handler for being boring or bad at the game."
+
         if goal == BotGoal.SUPPORT:
             return "Assist User", "Offer genuine help, backseating, or empathy."
             

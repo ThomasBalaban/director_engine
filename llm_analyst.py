@@ -5,7 +5,7 @@ import httpx
 from config import (
     OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL, 
     INTERJECTION_THRESHOLD, InputSource, MEMORY_THRESHOLD,
-    ConversationState, FlowState, UserIntent # [NEW IMPORTS]
+    ConversationState, FlowState, UserIntent 
 )
 from context_store import ContextStore, EventItem
 from user_profile_manager import UserProfileManager
@@ -32,6 +32,29 @@ async def close_http_client():
     if http_client:
         await http_client.aclose()
         http_client = None
+
+# --- NEW: Thought Generation for Internal Monologue ---
+async def generate_thought(prompt_text: str) -> Optional[str]:
+    """Generates a short, quirky thought based on the behavior engine's prompt."""
+    if not ollama_client: return None
+    
+    full_prompt = (
+        f"You are Nami's internal monologue (a chaotic, confident AI). "
+        f"Generate a single short sentence based on this thought prompt: '{prompt_text}'.\n"
+        f"Make it sound like a random shower thought, a conspiracy theory, or a sudden realization. "
+        f"Do not ask questions. Be confident but weird."
+    )
+    
+    try:
+        response = await ollama_client.chat(
+            model=OLLAMA_MODEL,
+            messages=[{'role': 'user', 'content': full_prompt}],
+            options={"temperature": 0.8, "num_predict": 50}
+        )
+        return response['message']['content'].strip().strip('"')
+    except Exception as e:
+        print(f"[Analyst] Thought generation error: {e}")
+        return None
 
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""

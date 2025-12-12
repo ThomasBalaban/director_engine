@@ -224,17 +224,19 @@ async def summary_ticker(store: ContextStore):
             )
             store.set_directive(directive) 
             
-            # Curiosity & Callbacks (Bot Thoughts)
-            thought_text = behavior_engine.check_curiosity(store, profile_manager)
+            # --- NEURO-FICATION: AWAIT Internal Monologue ---
+            # Replaced synchronous check_curiosity with async check_internal_monologue
+            thought_text = await behavior_engine.check_internal_monologue(store)
             if thought_text:
-                print(f"💡 [Curiosity] {thought_text}")
+                print(f"💡 [Internal Monologue] {thought_text}")
                 thought_event = store.add_event(
                     config.InputSource.INTERNAL_THOUGHT,
                     thought_text,
-                    {"type": "curiosity", "goal": behavior_engine.current_goal.name},
-                    EventScore(interestingness=0.6, conversational_value=0.9)
+                    {"type": "shower_thought", "goal": "fill_silence"},
+                    EventScore(interestingness=0.8, conversational_value=1.0, urgency=0.7)
                 )
                 emit_event_scored(thought_event)
+                # Immediately trigger analysis/interjection to make her say it
                 if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
                      asyncio.create_task(llm_analyst.analyze_and_update_event(
                         thought_event, store, profile_manager, handle_analysis_complete
