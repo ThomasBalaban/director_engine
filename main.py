@@ -3,8 +3,9 @@ import uvicorn
 import asyncio
 import threading
 import webbrowser
-import subprocess  # <--- NEW IMPORT
-import sys        # <--- NEW IMPORT
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -35,6 +36,9 @@ summary_ticker_task: Optional[asyncio.Task] = None
 sensor_bridge_task: Optional[asyncio.Task] = None
 server_ready: bool = False
 
+# Global handle for the child process
+vision_process: Optional[subprocess.Popen] = None
+
 # --- INIT ENGINES ---
 store = ContextStore()
 profile_manager = UserProfileManager()
@@ -48,58 +52,70 @@ scene_manager = SceneManager()
 decision_engine = DecisionEngine()
 prompt_constructor = PromptConstructor()
 
-# --- NEW: AUTO-LAUNCHER ---
+# --- AUTO-LAUNCHER ---
 def launch_vision_app():
     """
     Attempts to launch the sibling 'desktop_mon_gemini' app 
     in its own conda environment.
     """
+    global vision_process
     print("\n👁️ [Launcher] Attempting to start Vision Subsystem...")
     
-    # 1. Resolve Path: Go up one level from this script, then find sibling folder
     current_dir = Path(__file__).parent.resolve()
-    # Assuming structure: /Projects/director_engine/main.py -> parent is director_engine
-    # So we want /Projects/desktop_mon_gemini
+    # Assuming /director_engine/main.py -> parent is director_engine folder -> parent is workspace
     workspace_root = current_dir.parent
     vision_app_path = workspace_root / "desktop_mon_gemini"
     
-    # Fallback checks for folder names
+    # Fallback check
     if not vision_app_path.exists():
-        # Try alternate name if the first one fails
-        alt_path = workspace_root / "desktop_monitor_gemini"
-        if alt_path.exists():
-            vision_app_path = alt_path
-        else:
+        vision_app_path = workspace_root / "desktop_monitor_gemini"
+        if not vision_app_path.exists():
             print(f"⚠️ [Launcher] Could not find 'desktop_mon_gemini' folder at: {workspace_root}")
             print(f"   Please launch it manually.")
             return
 
     print(f"   Target: {vision_app_path}")
 
-    # 2. Construct Command
-    # 'conda run' allows us to execute a command in a specific env without activating shell
+    # Construct Command (using conda run)
     cmd = [
         "conda", "run",
         "-n", "gemini-screen-watcher",
-        "--no-capture-output", # Important: Let output flow to stdout so you can see errors
+        "--no-capture-output", 
         "python", "main.py"
     ]
 
     try:
-        # 3. Launch (Non-blocking)
-        # We start it as a subprocess. It will run in parallel.
-        subprocess.Popen(
+        # Save the process object to the global variable
+        vision_process = subprocess.Popen(
             cmd, 
             cwd=vision_app_path,
-            # We don't pipe stdout/stderr here so it prints to this terminal window
+            # We allow stdout to flow to this terminal so you can see errors
         )
-        print("✅ [Launcher] Vision Subsystem start command sent.")
+        print(f"✅ [Launcher] Vision Subsystem started (PID: {vision_process.pid})")
         
     except FileNotFoundError:
         print("❌ [Launcher] Error: 'conda' command not found. Is Conda in your PATH?")
     except Exception as e:
         print(f"❌ [Launcher] Failed to start vision app: {e}")
 
+def shutdown_vision_app():
+    """Kills the vision subsystem child process."""
+    global vision_process
+    if vision_process:
+        # Check if it's still running
+        if vision_process.poll() is None:
+            print("🛑 Stopping Vision Subsystem...")
+            vision_process.terminate()
+            try:
+                vision_process.wait(timeout=5)
+                print("✅ Vision Subsystem stopped gracefully.")
+            except subprocess.TimeoutExpired:
+                print("⚠️ Vision Subsystem stuck. Forcing kill...")
+                vision_process.kill()
+                print("💀 Vision Subsystem killed.")
+        else:
+            print("ℹ️ Vision Subsystem already stopped.")
+        vision_process = None
 
 # --- SHARED EVENT PROCESSOR ---
 async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
@@ -479,6 +495,9 @@ def run_server():
         print("\n⚠️ Keyboard interrupt")
     finally:
         print("🛑 Shutting down...")
+        # --- NEW SHUTDOWN LOGIC ---
+        shutdown_vision_app()
+        # --------------------------
         server_ready = False
         if summary_ticker_task:
             summary_ticker_task.cancel()
@@ -492,7 +511,7 @@ if __name__ == "__main__":
     print("🧠 DIRECTOR ENGINE (Brain 1) - Starting...")
     print("="*60)
     
-    # NEW: Attempt to Auto-Launch the Vision App
+    # Attempt to Auto-Launch the Vision App
     launch_vision_app()
     
     threading.Timer(2.0, open_browser).start()
