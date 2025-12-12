@@ -1,4 +1,3 @@
-# Save as: director_engine/main.py
 import uvicorn
 import asyncio
 import threading
@@ -6,6 +5,9 @@ import webbrowser
 import subprocess
 import sys
 import time
+import os
+import atexit
+import signal
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -52,74 +54,86 @@ scene_manager = SceneManager()
 decision_engine = DecisionEngine()
 prompt_constructor = PromptConstructor()
 
-# --- AUTO-LAUNCHER ---
+# --- ROBUST LAUNCHER ---
+def get_conda_python_path(env_name):
+    """Finds the direct python executable for a conda env to avoid 'conda run' wrappers."""
+    # Assuming standard Miniconda/Anaconda structure
+    # Try finding the env path relative to current python or standard locations
+    home = Path.home()
+    possible_paths = [
+        home / "miniconda3" / "envs" / env_name / "bin" / "python",
+        home / "anaconda3" / "envs" / env_name / "bin" / "python",
+        home / "opt" / "miniconda3" / "envs" / env_name / "bin" / "python",
+    ]
+    
+    for p in possible_paths:
+        if p.exists():
+            return str(p)
+    
+    # Fallback to just "python" if we can't find the specific env, 
+    # though this might use the wrong env if not careful.
+    return "python"
+
 def launch_vision_app():
     """
-    Attempts to launch the sibling 'desktop_mon_gemini' app 
-    in its own conda environment.
+    Attempts to launch the sibling 'desktop_mon_gemini' app.
     """
     global vision_process
     print("\n👁️ [Launcher] Attempting to start Vision Subsystem...")
     
     current_dir = Path(__file__).parent.resolve()
-    # Assuming /director_engine/main.py -> parent is director_engine folder -> parent is workspace
     workspace_root = current_dir.parent
     vision_app_path = workspace_root / "desktop_mon_gemini"
     
-    # Fallback check
     if not vision_app_path.exists():
         vision_app_path = workspace_root / "desktop_monitor_gemini"
         if not vision_app_path.exists():
-            print(f"⚠️ [Launcher] Could not find 'desktop_mon_gemini' folder at: {workspace_root}")
-            print(f"   Please launch it manually.")
+            print(f"⚠️ [Launcher] Vision app not found at {workspace_root}")
             return
 
+    # Use Direct Python Executable to avoid process wrapping issues
+    python_exe = get_conda_python_path("gemini-screen-watcher")
     print(f"   Target: {vision_app_path}")
+    print(f"   Python: {python_exe}")
 
-    # Construct Command (using conda run)
-    cmd = [
-        "conda", "run",
-        "-n", "gemini-screen-watcher",
-        "--no-capture-output", 
-        "python", "main.py"
-    ]
+    cmd = [python_exe, "main.py"]
 
     try:
-        # Save the process object to the global variable
+        # Create a process group so we can kill the whole tree if needed
         vision_process = subprocess.Popen(
             cmd, 
             cwd=vision_app_path,
-            # We allow stdout to flow to this terminal so you can see errors
+            preexec_fn=os.setsid # Create new process group
         )
         print(f"✅ [Launcher] Vision Subsystem started (PID: {vision_process.pid})")
         
-    except FileNotFoundError:
-        print("❌ [Launcher] Error: 'conda' command not found. Is Conda in your PATH?")
     except Exception as e:
         print(f"❌ [Launcher] Failed to start vision app: {e}")
 
 def shutdown_vision_app():
-    """Kills the vision subsystem child process."""
+    """Kills the vision subsystem child process securely."""
     global vision_process
     if vision_process:
-        # Check if it's still running
-        if vision_process.poll() is None:
-            print("🛑 Stopping Vision Subsystem...")
-            vision_process.terminate()
+        print(f"🛑 [Shutdown] Terminating Vision Subsystem (PID: {vision_process.pid})...")
+        try:
+            # Kill the entire process group to ensure children die
+            os.killpg(os.getpgid(vision_process.pid), signal.SIGTERM)
+            vision_process.wait(timeout=3)
+            print("✅ Vision Subsystem stopped.")
+        except Exception as e:
+            print(f"⚠️ [Shutdown] Error killing process group: {e}")
             try:
-                vision_process.wait(timeout=5)
-                print("✅ Vision Subsystem stopped gracefully.")
-            except subprocess.TimeoutExpired:
-                print("⚠️ Vision Subsystem stuck. Forcing kill...")
                 vision_process.kill()
-                print("💀 Vision Subsystem killed.")
-        else:
-            print("ℹ️ Vision Subsystem already stopped.")
+            except:
+                pass
         vision_process = None
+
+# Register cleanup to run on exit, crash, or Ctrl+C
+atexit.register(shutdown_vision_app)
 
 # --- SHARED EVENT PROCESSOR ---
 async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
-    # 1. UI Emit (Raw Data)
+    # 1. UI Emit
     if source == config.InputSource.VISUAL_CHANGE:
         emit_vision_context(text)
     elif source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
@@ -134,7 +148,7 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
         profile = profile_manager.get_profile(username)
         store.set_active_user(profile)
 
-    # 3. Handle Bot Self-Reply (Echo)
+    # 3. Handle Bot Self-Reply
     if source == config.InputSource.BOT_TWITCH_REPLY:
         zero_score = EventScore()
         store.add_event(source, text, metadata, zero_score)
@@ -148,18 +162,17 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
     event = store.add_event(source, text, metadata, heuristic_score)
     emit_event_scored(event)
     
-    # 5. Debt Check (Did user answer a question?)
+    # 5. Debt Check
     if source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
          behavior_engine.check_debt_resolution(store, text)
 
-    # 6. Event Bundling (Linking Speech to Visuals)
+    # 6. Event Bundling
     bundle_event_created = False
     primary_score = heuristic_score.interestingness
 
     if source in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.6:
         store.set_pending_speech(event)
     elif source not in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.MICROPHONE] and primary_score >= 0.7:
-        # If we see something interesting right after hearing something, link them
         pending_speech = store.get_and_clear_pending_speech(max_age_seconds=3.0)
         if pending_speech:
             print(f"✅ EVENT BUNDLE: {pending_speech.text} + {event.text}")
@@ -168,17 +181,15 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
             bundle_score = EventScore(interestingness=1.0, urgency=0.9, conversational_value=1.0, topic_relevance=1.0)
             bundle_event = store.add_event(event.source, bundle_text, bundle_metadata, bundle_score)
             emit_event_scored(bundle_event)
-            # Immediate Analysis on Bundles
             asyncio.create_task(llm_analyst.analyze_and_update_event(
                 bundle_event, store, profile_manager, handle_analysis_complete
             ))
             bundle_event_created = True
 
-    # 7. Attention & Analysis Trigger
+    # 7. Attention & Analysis
     if not bundle_event_created:
         attended_event = behavior_engine.direct_attention(store, [event])
         if attended_event:
-            # Analyze if high score OR if urgent enough to break silence
             if primary_score >= config.OLLAMA_TRIGGER_THRESHOLD:
                 asyncio.create_task(llm_analyst.analyze_and_update_event(
                     event, store, profile_manager, handle_analysis_complete
@@ -194,7 +205,7 @@ async def summary_ticker(store: ContextStore):
     while not server_ready:
         await asyncio.sleep(0.1)
     
-    print("✅ Summary ticker starting (server is ready)")
+    print("✅ Summary ticker starting")
     await asyncio.sleep(5) 
     
     while True:
@@ -225,7 +236,6 @@ async def summary_ticker(store: ContextStore):
             store.set_directive(directive) 
             
             # --- NEURO-FICATION: AWAIT Internal Monologue ---
-            # Replaced synchronous check_curiosity with async check_internal_monologue
             thought_text = await behavior_engine.check_internal_monologue(store)
             if thought_text:
                 print(f"💡 [Internal Monologue] {thought_text}")
@@ -236,7 +246,6 @@ async def summary_ticker(store: ContextStore):
                     EventScore(interestingness=0.8, conversational_value=1.0, urgency=0.7)
                 )
                 emit_event_scored(thought_event)
-                # Immediately trigger analysis/interjection to make her say it
                 if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
                      asyncio.create_task(llm_analyst.analyze_and_update_event(
                         thought_event, store, profile_manager, handle_analysis_complete
@@ -406,7 +415,6 @@ async def ingest_event(sid, payload: dict):
         print(f"Invalid event payload: {e}")
         return
     
-    # Use shared processor
     await process_engine_event(
         source_enum, 
         payload_model.text, 
@@ -470,14 +478,11 @@ def run_server():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     ui_event_loop = loop
-    print(f"✅ UI event loop captured: {id(ui_event_loop)}")
     
     loop.run_until_complete(llm_analyst.create_http_client())
     
-    # 1. Start Summary Ticker
     summary_ticker_task = loop.create_task(summary_ticker(store))
     
-    # 2. Start Sensor Bridge (Connect to Vision App)
     sensor_bridge = SensorBridge(
         vision_uri="ws://localhost:8003", 
         hearing_uri="ws://localhost:8003", 
@@ -497,14 +502,10 @@ def run_server():
         print("\n⚠️ Keyboard interrupt")
     finally:
         print("🛑 Shutting down...")
-        # --- NEW SHUTDOWN LOGIC ---
         shutdown_vision_app()
-        # --------------------------
         server_ready = False
-        if summary_ticker_task:
-            summary_ticker_task.cancel()
-        if sensor_bridge_task:
-            sensor_bridge_task.cancel()
+        if summary_ticker_task: summary_ticker_task.cancel()
+        if sensor_bridge_task: sensor_bridge_task.cancel()
         loop.run_until_complete(llm_analyst.close_http_client())
         loop.close()
 
@@ -513,7 +514,6 @@ if __name__ == "__main__":
     print("🧠 DIRECTOR ENGINE (Brain 1) - Starting...")
     print("="*60)
     
-    # Attempt to Auto-Launch the Vision App
     launch_vision_app()
     
     threading.Timer(2.0, open_browser).start()
