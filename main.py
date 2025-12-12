@@ -3,6 +3,8 @@ import uvicorn
 import asyncio
 import threading
 import webbrowser
+import subprocess  # <--- NEW IMPORT
+import sys        # <--- NEW IMPORT
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -26,11 +28,11 @@ from context_compression import ContextCompressor
 from scene_manager import SceneManager
 from decision_engine import DecisionEngine
 from prompt_constructor import PromptConstructor
-from sensor_bridge import SensorBridge  # <--- NEW IMPORT
+from sensor_bridge import SensorBridge
 
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
-sensor_bridge_task: Optional[asyncio.Task] = None # <--- NEW TASK
+sensor_bridge_task: Optional[asyncio.Task] = None
 server_ready: bool = False
 
 # --- INIT ENGINES ---
@@ -46,8 +48,60 @@ scene_manager = SceneManager()
 decision_engine = DecisionEngine()
 prompt_constructor = PromptConstructor()
 
+# --- NEW: AUTO-LAUNCHER ---
+def launch_vision_app():
+    """
+    Attempts to launch the sibling 'desktop_mon_gemini' app 
+    in its own conda environment.
+    """
+    print("\n👁️ [Launcher] Attempting to start Vision Subsystem...")
+    
+    # 1. Resolve Path: Go up one level from this script, then find sibling folder
+    current_dir = Path(__file__).parent.resolve()
+    # Assuming structure: /Projects/director_engine/main.py -> parent is director_engine
+    # So we want /Projects/desktop_mon_gemini
+    workspace_root = current_dir.parent
+    vision_app_path = workspace_root / "desktop_mon_gemini"
+    
+    # Fallback checks for folder names
+    if not vision_app_path.exists():
+        # Try alternate name if the first one fails
+        alt_path = workspace_root / "desktop_monitor_gemini"
+        if alt_path.exists():
+            vision_app_path = alt_path
+        else:
+            print(f"⚠️ [Launcher] Could not find 'desktop_mon_gemini' folder at: {workspace_root}")
+            print(f"   Please launch it manually.")
+            return
+
+    print(f"   Target: {vision_app_path}")
+
+    # 2. Construct Command
+    # 'conda run' allows us to execute a command in a specific env without activating shell
+    cmd = [
+        "conda", "run",
+        "-n", "gemini-screen-watcher",
+        "--no-capture-output", # Important: Let output flow to stdout so you can see errors
+        "python", "main.py"
+    ]
+
+    try:
+        # 3. Launch (Non-blocking)
+        # We start it as a subprocess. It will run in parallel.
+        subprocess.Popen(
+            cmd, 
+            cwd=vision_app_path,
+            # We don't pipe stdout/stderr here so it prints to this terminal window
+        )
+        print("✅ [Launcher] Vision Subsystem start command sent.")
+        
+    except FileNotFoundError:
+        print("❌ [Launcher] Error: 'conda' command not found. Is Conda in your PATH?")
+    except Exception as e:
+        print(f"❌ [Launcher] Failed to start vision app: {e}")
+
+
 # --- SHARED EVENT PROCESSOR ---
-# This is the core logic that handles ALL inputs (SocketIO or Sensor Bridge)
 async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
     # 1. UI Emit (Raw Data)
     if source == config.InputSource.VISUAL_CHANGE:
@@ -406,7 +460,11 @@ def run_server():
     summary_ticker_task = loop.create_task(summary_ticker(store))
     
     # 2. Start Sensor Bridge (Connect to Vision App)
-    sensor_bridge = SensorBridge(event_callback=process_engine_event)
+    sensor_bridge = SensorBridge(
+        vision_uri="ws://localhost:8003", 
+        hearing_uri="ws://localhost:8003", 
+        event_callback=process_engine_event
+    )
     sensor_bridge_task = loop.create_task(sensor_bridge.run())
     
     server_ready = True
@@ -433,5 +491,9 @@ if __name__ == "__main__":
     print("="*60)
     print("🧠 DIRECTOR ENGINE (Brain 1) - Starting...")
     print("="*60)
+    
+    # NEW: Attempt to Auto-Launch the Vision App
+    launch_vision_app()
+    
     threading.Timer(2.0, open_browser).start()
     run_server()
