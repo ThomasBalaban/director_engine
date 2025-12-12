@@ -87,62 +87,78 @@ class SensorBridge:
     async def _parse_gemini_content(self, text):
         """
         Handle deep context from the slow vision AI.
-        Parses XML tags from the updated system prompt.
+        Parses XML tags, Legacy brackets, OR Plain Text narratives.
         """
         if not self.callback: return
+        
+        clean_text = text.strip()
+        if not clean_text or clean_text.lower() in ["[silence]", "none", "n/a", "silence"]: 
+            return
 
+        # 1. Try XML Parsing (Old Prompt Style)
         # Regex to match XML-style tags <tag>content</tag>
         xml_pattern = r"<(\w+)>([\s\S]*?)<\/\1>"
-        matches = list(re.finditer(xml_pattern, text))
+        matches = list(re.finditer(xml_pattern, clean_text))
         
-        found_xml = False
-        
-        for match in matches:
-            found_xml = True
-            tag = match.group(1).lower()
-            content = match.group(2).strip()
-            
-            if not content or content.lower() in ["[silence]", "none", "n/a", "silence"]: 
-                continue
+        if matches:
+            for match in matches:
+                tag = match.group(1).lower()
+                content = match.group(2).strip()
+                
+                if not content or content.lower() in ["[silence]", "none"]: 
+                    continue
 
-            source = InputSource.VISUAL_CHANGE
-            
-            if tag == "audio_context":
-                source = InputSource.AMBIENT_AUDIO
-            elif tag in ["summary", "scene_and_entities", "characters_and_appeal", "text_and_ui", "actionable_events"]:
                 source = InputSource.VISUAL_CHANGE
-            
-            display_tag = tag.upper()
+                
+                if tag == "audio_context":
+                    source = InputSource.AMBIENT_AUDIO
+                elif tag in ["summary", "scene_and_entities", "characters_and_appeal", "text_and_ui", "actionable_events"]:
+                    source = InputSource.VISUAL_CHANGE
+                
+                display_tag = tag.upper()
 
-            await self.callback(
-                source=source,
-                text=content,
-                metadata={
-                    "raw_tag": display_tag, 
-                    "confidence": 1.0, 
-                    "type": "gemini_analysis", 
-                    "xml_tag": tag
-                }
-            )
+                await self.callback(
+                    source=source,
+                    text=content,
+                    metadata={
+                        "raw_tag": display_tag, 
+                        "confidence": 1.0, 
+                        "type": "gemini_analysis", 
+                        "xml_tag": tag
+                    }
+                )
+            return # Stop if XML was found
 
-        # Fallback for legacy format
-        if not found_xml and text.strip():
-            legacy_pattern = r"\[(AUDIO|VISUAL|ACTION|CHARACTERS|DIALOGUE|AUDIO/DIALOGUE)\]:?\s*(.*?)(?=(?:\n\d+\.|\[|$))"
-            legacy_matches = list(re.finditer(legacy_pattern, text, re.DOTALL | re.IGNORECASE))
-            
-            if legacy_matches:
-                for match in legacy_matches:
-                    tag = match.group(1).upper()
-                    content = match.group(2).strip()
-                    if not content or content == "[SILENCE]": continue
+        # 2. Try Legacy Parsing [TAG]: Content
+        legacy_pattern = r"\[(AUDIO|VISUAL|ACTION|CHARACTERS|DIALOGUE|AUDIO/DIALOGUE)\]:?\s*(.*?)(?=(?:\n\d+\.|\[|$))"
+        legacy_matches = list(re.finditer(legacy_pattern, clean_text, re.DOTALL | re.IGNORECASE))
+        
+        if legacy_matches:
+            for match in legacy_matches:
+                tag = match.group(1).upper()
+                content = match.group(2).strip()
+                if not content or content == "[SILENCE]": continue
 
-                    if "AUDIO" in tag:
-                        source = InputSource.AMBIENT_AUDIO
-                    else:
-                        source = InputSource.VISUAL_CHANGE
-                    
-                    await self.callback(
-                        source=source,
-                        text=content,
-                        metadata={"raw_tag": tag, "confidence": 1.0, "type": "gemini_analysis_legacy"}
-                    )
+                source = InputSource.VISUAL_CHANGE
+                if "AUDIO" in tag:
+                    source = InputSource.AMBIENT_AUDIO
+                
+                await self.callback(
+                    source=source,
+                    text=content,
+                    metadata={"raw_tag": tag, "confidence": 1.0, "type": "gemini_analysis_legacy"}
+                )
+            return # Stop if Legacy was found
+
+        # 3. Fallback: Plain Text / Markdown (The new default for "React" style)
+        # This handles the "1. **The Action:** ..." format or just raw paragraphs.
+        # We assume it's visual unless specific audio markers exist (which the current prompt avoids).
+        await self.callback(
+            source=InputSource.VISUAL_CHANGE,
+            text=clean_text,
+            metadata={
+                "raw_tag": "VISUAL", 
+                "confidence": 1.0, 
+                "type": "gemini_narrative"
+            }
+        )
