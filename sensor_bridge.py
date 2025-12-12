@@ -5,7 +5,7 @@ import re
 from config import InputSource
 
 class SensorBridge:
-    def __init__(self, vision_uri="ws://localhost:8001", hearing_uri="ws://localhost:8003", event_callback=None):
+    def __init__(self, vision_uri="ws://localhost:8003", hearing_uri="ws://localhost:8003", event_callback=None):
         self.vision_uri = vision_uri
         self.hearing_uri = hearing_uri
         self.callback = event_callback
