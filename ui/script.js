@@ -208,14 +208,31 @@ socket.on('director_state', (data) => {
 const MAX_LOG_LINES = 100;
 const MAX_PANEL_LINES = 20;
 
-function updateAmbientLog(elementId, logArray, newText) {
+function updateAmbientLog(elementId, logArray, newText, itemClass = '') {
     const el = document.getElementById(elementId);
     if(!el) return;
+    
     logArray.push(newText);
     if (logArray.length > MAX_PANEL_LINES) {
         logArray.shift();
     }
-    el.textContent = logArray.join('\n\n');
+    
+    // Clear and Re-render as HTML elements
+    el.innerHTML = '';
+    
+    logArray.forEach(text => {
+        const div = document.createElement('div');
+        div.textContent = text;
+        div.style.marginBottom = '0.5rem';
+        
+        // Apply class if provided
+        if (itemClass) {
+            div.className = itemClass;
+        }
+        
+        el.appendChild(div);
+    });
+
     el.parentElement.scrollTop = el.parentElement.scrollHeight;
 }
 
@@ -243,7 +260,7 @@ function highlightMentions(message) {
 // --- Data Listeners ---
 socket.on('vision_context', d => updateAmbientLog('vision-context', visionLog, d.context));
 socket.on('spoken_word_context', d => updateAmbientLog('spoken-word-context', spokenLog, d.context));
-socket.on('audio_context', d => updateAmbientLog('audio-context', audioLog, d.context));
+socket.on('audio_context', d => updateAmbientLog('audio-context', audioLog, d.context, 'audio-highlight'));
 
 socket.on('event_scored', (data) => {
     // 1. Update Graph
