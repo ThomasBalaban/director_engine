@@ -7,10 +7,13 @@ from typing import List, Tuple, Any
 class SemanticMemoryRetriever:
     def __init__(self, model_name='all-MiniLM-L6-v2'):
         print(f"🧠 [Memory] Loading embedding model: {model_name}...")
-        # This will download the model on first run (approx 80MB)
-        self.model = SentenceTransformer(model_name)
+        
+        # FIX: Force device='cpu' to prevent macOS Metal/MPS crash:
+        # "failed assertion 'A command encoder is already encoding to this command buffer'"
+        self.model = SentenceTransformer(model_name, device='cpu')
+        
         self.embedding_cache = {} # {event_id: embedding_tensor}
-        print(f"✅ [Memory] Semantic model loaded.")
+        print(f"✅ [Memory] Semantic model loaded (CPU Enforced).")
 
     def _get_embedding(self, text: str):
         """Generates embedding for text."""
