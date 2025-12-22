@@ -50,7 +50,9 @@ class SensorBridge:
                     async for message in ws:
                         try:
                             data = json.loads(message)
-                            if data.get("type") == "transcript":
+                            # Update: Accept both 'transcript' and 'partial_transcript'
+                            msg_type = data.get("type")
+                            if msg_type in ["transcript", "partial_transcript"]:
                                 await self._parse_whisper_content(data)
                         except json.JSONDecodeError:
                             pass
@@ -78,10 +80,17 @@ class SensorBridge:
         else:
             source = InputSource.AMBIENT_AUDIO
 
+        # Include is_partial in metadata for potential downstream filtering
+        meta = {
+            "confidence": data.get("confidence", 1.0), 
+            "type": "fast_transcription",
+            "is_partial": data.get("is_partial", False)
+        }
+
         await self.callback(
             source=source,
             text=text,
-            metadata={"confidence": data.get("confidence", 1.0), "type": "fast_transcription"}
+            metadata=meta
         )
 
     async def _parse_gemini_content(self, text):
