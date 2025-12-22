@@ -139,7 +139,9 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
     elif source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
         emit_spoken_word_context(text)
     elif source == config.InputSource.AMBIENT_AUDIO:
-        emit_audio_context(text)
+        # Pass the partial flag from metadata to the UI
+        is_partial = metadata.get("is_partial", False)
+        emit_audio_context(text, is_partial=is_partial)
     elif source in [config.InputSource.TWITCH_CHAT, config.InputSource.TWITCH_MENTION]:
         emit_twitch_message(username or "Chat", text)
     
@@ -373,7 +375,8 @@ def _emit_threadsafe(event, data):
 
 def emit_vision_context(context): _emit_threadsafe('vision_context', {'context': context})
 def emit_spoken_word_context(context): _emit_threadsafe('spoken_word_context', {'context': context})
-def emit_audio_context(context): _emit_threadsafe('audio_context', {'context': context})
+def emit_audio_context(context, is_partial=False): 
+    _emit_threadsafe('audio_context', {'context': context, 'is_partial': is_partial})
 def emit_twitch_message(username, message): _emit_threadsafe('twitch_message', {'username': username, 'message': message})
 def emit_bot_reply(reply, prompt="", is_censored=False): _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
 

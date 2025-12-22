@@ -84,7 +84,7 @@ class SensorBridge:
         meta = {
             "confidence": data.get("confidence", 1.0), 
             "type": "fast_transcription",
-            "is_partial": data.get("is_partial", False)
+            "is_partial": data.get("is_partial", False) 
         }
 
         await self.callback(

@@ -34,6 +34,8 @@ const dirActionEl = document.getElementById('dir-action');
 const dirConstraintsBox = document.getElementById('dir-constraints-box');
 const dirConstraintsEl = document.getElementById('dir-constraints');
 
+let lastAudioWasPartial = false;
+
 
 // Context Logs
 const visionLog = [];
@@ -208,28 +210,26 @@ socket.on('director_state', (data) => {
 const MAX_LOG_LINES = 100;
 const MAX_PANEL_LINES = 20;
 
-function updateAmbientLog(elementId, logArray, newText, itemClass = '') {
+function updateAmbientLog(elementId, logArray, newText, itemClass = '', isUpdate = false) {
     const el = document.getElementById(elementId);
     if(!el) return;
     
-    logArray.push(newText);
-    if (logArray.length > MAX_PANEL_LINES) {
-        logArray.shift();
+    if (isUpdate && logArray.length > 0) {
+        // Replace the last item instead of pushing
+        logArray[logArray.length - 1] = newText;
+    } else {
+        logArray.push(newText);
+        if (logArray.length > MAX_PANEL_LINES) {
+            logArray.shift();
+        }
     }
     
-    // Clear and Re-render as HTML elements
     el.innerHTML = '';
-    
     logArray.forEach(text => {
         const div = document.createElement('div');
         div.textContent = text;
         div.style.marginBottom = '0.5rem';
-        
-        // Apply class if provided
-        if (itemClass) {
-            div.className = itemClass;
-        }
-        
+        if (itemClass) div.className = itemClass;
         el.appendChild(div);
     });
 
@@ -260,8 +260,30 @@ function highlightMentions(message) {
 // --- Data Listeners ---
 socket.on('vision_context', d => updateAmbientLog('vision-context', visionLog, d.context));
 socket.on('spoken_word_context', d => updateAmbientLog('spoken-word-context', spokenLog, d.context));
-socket.on('audio_context', d => updateAmbientLog('audio-context', audioLog, d.context, 'audio-highlight'));
+socket.on('audio_context', d => {
+    const logContainer = document.getElementById('audio-context');
+    if (!logContainer) return;
 
+    // Check if we are updating a specific session item
+    let existingItem = document.getElementById(`session-${d.session_id}`);
+    
+    if (d.is_partial && existingItem) {
+        // Update the singular long item
+        existingItem.textContent = d.context;
+        existingItem.classList.add('live-pulse'); // Visual feedback it's still "typing"
+    } else {
+        // Create a new item (either a new session or a final transcript)
+        const div = document.createElement('div');
+        if (d.session_id) div.id = `session-${d.session_id}`;
+        div.className = 'audio-highlight';
+        div.textContent = d.context;
+        
+        logContainer.appendChild(div);
+        
+        // Auto-scroll
+        logContainer.parentElement.scrollTop = logContainer.parentElement.scrollHeight;
+    }
+});
 socket.on('event_scored', (data) => {
     // 1. Update Graph
     if (interestChart) {
