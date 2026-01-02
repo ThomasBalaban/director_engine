@@ -19,7 +19,16 @@ class SensorBridge:
         vision_task = asyncio.create_task(self._vision_loop())
         hearing_task = asyncio.create_task(self._hearing_loop())
         
-        await asyncio.gather(vision_task, hearing_task)
+        try:
+            await asyncio.gather(vision_task, hearing_task)
+        except asyncio.CancelledError:
+            print("🔌 [Bridge] Shutting down gracefully...")
+            self.running = False
+            vision_task.cancel()
+            hearing_task.cancel()
+            # Wait for them to actually cancel
+            await asyncio.gather(vision_task, hearing_task, return_exceptions=True)
+            raise
 
     # --- LOOP 1: VISION (Gemini) ---
     async def _vision_loop(self):
@@ -29,10 +38,15 @@ class SensorBridge:
                 async with websockets.connect(self.vision_uri) as ws:
                     print("👁️ [Bridge] Vision Connected!")
                     async for message in ws:
+                        if not self.running:
+                            break
                         data = json.loads(message)
                         if data.get("type") == "text_update":
                             await self._parse_gemini_content(data.get("content", ""))
                             
+            except asyncio.CancelledError:
+                print("👁️ [Bridge] Vision loop cancelled")
+                break
             except (ConnectionRefusedError, OSError):
                 print("⚠️ [Bridge] Vision lost. Retrying in 5s...")
                 await asyncio.sleep(5)
