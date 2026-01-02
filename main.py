@@ -7,9 +7,9 @@ import sys
 import time
 import os
 import atexit
-import signal
-from pathlib import Path
+import signal as signal_module 
 
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -499,18 +499,68 @@ def run_server():
     config_uvicorn = uvicorn.Config(app, host=config.DIRECTOR_HOST, port=config.DIRECTOR_PORT, log_level="warning", loop="asyncio")
     server = uvicorn.Server(config_uvicorn)
     
+    # Setup clean shutdown
+    def signal_handler():
+        print("\n⚠️ Shutdown signal received...")
+        server.should_exit = True
+    
+    # Add signal handlers to the loop
+    for sig in (signal_module.SIGINT, signal_module.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
+    
     try:
         loop.run_until_complete(server.serve())
     except KeyboardInterrupt:
         print("\n⚠️ Keyboard interrupt")
     finally:
-        print("🛑 Shutting down...")
-        shutdown_vision_app()
+        print("\n" + "="*60)
+        print("🛑 DIRECTOR ENGINE SHUTDOWN INITIATED")
+        print("="*60)
+        
         server_ready = False
-        if summary_ticker_task: summary_ticker_task.cancel()
-        if sensor_bridge_task: sensor_bridge_task.cancel()
-        loop.run_until_complete(llm_analyst.close_http_client())
-        loop.close()
+        
+        # 1. Cancel sensor bridge (this closes WebSocket connections)
+        print("  [1/4] Stopping Sensor Bridge...")
+        if sensor_bridge_task and not sensor_bridge_task.done():
+            sensor_bridge_task.cancel()
+            try:
+                loop.run_until_complete(asyncio.wait_for(sensor_bridge_task, timeout=2.0))
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        
+        # 2. Cancel summary ticker
+        print("  [2/4] Stopping Summary Ticker...")
+        if summary_ticker_task and not summary_ticker_task.done():
+            summary_ticker_task.cancel()
+            try:
+                loop.run_until_complete(asyncio.wait_for(summary_ticker_task, timeout=2.0))
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        
+        # 3. Close HTTP client
+        print("  [3/4] Closing HTTP clients...")
+        try:
+            loop.run_until_complete(llm_analyst.close_http_client())
+        except Exception as e:
+            print(f"    ⚠️ HTTP client error: {e}")
+        
+        # 4. Shutdown Vision App (this triggers its own cleanup)
+        print("  [4/4] Shutting down Vision Subsystem...")
+        shutdown_vision_app()
+        
+        # Give vision app a moment to clean up
+        time.sleep(1.0)
+        
+        # Close the loop
+        try:
+            loop.close()
+        except:
+            pass
+        
+        print("="*60)
+        print("✅ DIRECTOR ENGINE SHUTDOWN COMPLETE")
+        print("="*60)
+
 
 if __name__ == "__main__":
     print("="*60)

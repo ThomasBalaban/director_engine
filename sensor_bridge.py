@@ -15,78 +15,90 @@ class SensorBridge:
         self.running = True
         print(f"🔌 [Bridge] Initializing Dual-Sensors...")
         
-        # Create two parallel tasks for the two senses
-        vision_task = asyncio.create_task(self._vision_loop())
-        hearing_task = asyncio.create_task(self._hearing_loop())
+        # Wait for the vision app to start up
+        print(f"🔌 [Bridge] Waiting 5s for Vision subsystem to initialize...")
+        await asyncio.sleep(5)
         
-        try:
-            await asyncio.gather(vision_task, hearing_task)
-        except asyncio.CancelledError:
-            print("🔌 [Bridge] Shutting down gracefully...")
-            self.running = False
-            vision_task.cancel()
-            hearing_task.cancel()
-            # Wait for them to actually cancel
-            await asyncio.gather(vision_task, hearing_task, return_exceptions=True)
-            raise
+        # CHANGE: Use a SINGLE connection instead of two
+        # Both vision and hearing come from the same WebSocket anyway
+        await self._unified_loop()
 
-    # --- LOOP 1: VISION (Gemini) ---
-    async def _vision_loop(self):
+    async def _unified_loop(self):
+        """Single connection that handles both vision and hearing."""
+        retry_count = 0
         while self.running:
             try:
-                print(f"👁️ [Bridge] Connecting to Vision (Port 8003)...")
-                async with websockets.connect(self.vision_uri) as ws:
-                    print("👁️ [Bridge] Vision Connected!")
+                print(f"🔌 [Bridge] Connecting to Sensor Server (Port 8003)...")
+                async with websockets.connect(self.vision_uri, ping_interval=20, ping_timeout=10) as ws:
+                    print("🔌 [Bridge] Connected!")
+                    retry_count = 0
+                    
                     async for message in ws:
                         if not self.running:
                             break
-                        data = json.loads(message)
-                        if data.get("type") == "text_update":
-                            await self._parse_gemini_content(data.get("content", ""))
-                            
-            except asyncio.CancelledError:
-                print("👁️ [Bridge] Vision loop cancelled")
-                break
-            except (ConnectionRefusedError, OSError):
-                print("⚠️ [Bridge] Vision lost. Retrying in 5s...")
-                await asyncio.sleep(5)
-            except Exception as e:
-                print(f"❌ [Bridge] Vision Error: {e}")
-                await asyncio.sleep(5)
-
-    # --- LOOP 2: HEARING (Whisper) ---
-    async def _hearing_loop(self):
-        while self.running:
-            try:
-                print(f"👂 [Bridge] Connecting to Hearing (Port 8003)...")
-                async with websockets.connect(self.hearing_uri) as ws:
-                    print("👂 [Bridge] Hearing Connected!")
-                    async for message in ws:
+                        
                         try:
                             data = json.loads(message)
-                            # Update: Accept both 'transcript' and 'partial_transcript'
-                            msg_type = data.get("type")
-                            if msg_type in ["transcript", "partial_transcript"]:
+                            msg_type = data.get("type", "unknown")
+                            
+                            # DEBUG: Print ALL messages except heartbeat
+                            if msg_type != "heartbeat":
+                                print(f"📨 [Bridge] RAW MESSAGE: type={msg_type}, keys={list(data.keys())}")
+                            
+                            # Handle vision updates
+                            if msg_type == "text_update":
+                                content = data.get("content", "")
+                                if content:
+                                    print(f"👁️ [Bridge] Vision update: {content[:60]}...")
+                                    await self._parse_gemini_content(content)
+                            
+                            # Handle transcripts
+                            elif msg_type in ["transcript", "partial_transcript"]:
+                                print(f"👂 [Bridge] Transcript: {data.get('text', '')[:60]}...")
                                 await self._parse_whisper_content(data)
-                        except json.JSONDecodeError:
-                            pass
-                        
-            except (ConnectionRefusedError, OSError):
-                await asyncio.sleep(5)
+                                
+                        except json.JSONDecodeError as e:
+                            print(f"⚠️ [Bridge] JSON decode error: {e}")
+                        except Exception as e:
+                            print(f"⚠️ [Bridge] Message handling error: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            
+            except asyncio.CancelledError:
+                print("🔌 [Bridge] Loop cancelled")
+                break
+            except (ConnectionRefusedError, OSError) as e:
+                retry_count += 1
+                wait_time = min(5 * retry_count, 30)
+                print(f"⚠️ [Bridge] Connection failed (attempt {retry_count}): {e}")
+                print(f"⚠️ [Bridge] Retrying in {wait_time}s...")
+                try:
+                    await asyncio.sleep(wait_time)
+                except asyncio.CancelledError:
+                    break
             except Exception as e:
-                print(f"❌ [Bridge] Hearing Error: {e}")
-                await asyncio.sleep(5)
+                print(f"❌ [Bridge] Error: {e}")
+                import traceback
+                traceback.print_exc()
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
 
     # --- PARSERS ---
 
     async def _parse_whisper_content(self, data):
         """Handle raw subtitles from the fast local transcriber."""
-        if not self.callback: return
+        if not self.callback:
+            print("⚠️ [Bridge] No callback set!")
+            return
         
         text = data.get("text", "").strip()
         source_str = data.get("source", "desktop")
         
-        if not text: return
+        if not text:
+            print("⚠️ [Bridge] Empty transcript text")
+            return
 
         # Map to Director InputSource
         if source_str == "microphone":
@@ -94,32 +106,37 @@ class SensorBridge:
         else:
             source = InputSource.AMBIENT_AUDIO
 
-        # Include is_partial in metadata for potential downstream filtering
         meta = {
             "confidence": data.get("confidence", 1.0), 
             "type": "fast_transcription",
             "is_partial": data.get("is_partial", False) 
         }
 
-        await self.callback(
-            source=source,
-            text=text,
-            metadata=meta
-        )
+        print(f"✅ [Bridge] Sending transcript to callback: source={source.name}, text={text[:40]}...")
+        
+        try:
+            await self.callback(
+                source=source,
+                text=text,
+                metadata=meta
+            )
+            print(f"✅ [Bridge] Callback completed successfully")
+        except Exception as e:
+            print(f"❌ [Bridge] Callback error: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def _parse_gemini_content(self, text):
-        """
-        Handle deep context from the slow vision AI.
-        Parses XML tags, Legacy brackets, OR Plain Text narratives.
-        """
-        if not self.callback: return
+        """Handle deep context from the slow vision AI."""
+        if not self.callback:
+            print("⚠️ [Bridge] No callback set!")
+            return
         
         clean_text = text.strip()
         if not clean_text or clean_text.lower() in ["[silence]", "none", "n/a", "silence"]: 
             return
 
-        # 1. Try XML Parsing (Old Prompt Style)
-        # Regex to match XML-style tags <tag>content</tag>
+        # 1. Try XML Parsing
         xml_pattern = r"<(\w+)>([\s\S]*?)<\/\1>"
         matches = list(re.finditer(xml_pattern, clean_text))
         
@@ -135,24 +152,22 @@ class SensorBridge:
                 
                 if tag == "audio_context":
                     source = InputSource.AMBIENT_AUDIO
-                elif tag in ["summary", "scene_and_entities", "characters_and_appeal", "text_and_ui", "actionable_events"]:
-                    source = InputSource.VISUAL_CHANGE
                 
-                display_tag = tag.upper()
-
+                print(f"✅ [Bridge] Sending XML vision to callback: tag={tag}")
+                
                 await self.callback(
                     source=source,
                     text=content,
                     metadata={
-                        "raw_tag": display_tag, 
+                        "raw_tag": tag.upper(), 
                         "confidence": 1.0, 
                         "type": "gemini_analysis", 
                         "xml_tag": tag
                     }
                 )
-            return # Stop if XML was found
+            return
 
-        # 2. Try Legacy Parsing [TAG]: Content
+        # 2. Try Legacy Parsing
         legacy_pattern = r"\[(AUDIO|VISUAL|ACTION|CHARACTERS|DIALOGUE|AUDIO/DIALOGUE)\]:?\s*(.*?)(?=(?:\n\d+\.|\[|$))"
         legacy_matches = list(re.finditer(legacy_pattern, clean_text, re.DOTALL | re.IGNORECASE))
         
@@ -166,16 +181,18 @@ class SensorBridge:
                 if "AUDIO" in tag:
                     source = InputSource.AMBIENT_AUDIO
                 
+                print(f"✅ [Bridge] Sending legacy vision to callback: tag={tag}")
+                
                 await self.callback(
                     source=source,
                     text=content,
                     metadata={"raw_tag": tag, "confidence": 1.0, "type": "gemini_analysis_legacy"}
                 )
-            return # Stop if Legacy was found
+            return
 
-        # 3. Fallback: Plain Text / Markdown (The new default for "React" style)
-        # This handles the "1. **The Action:** ..." format or just raw paragraphs.
-        # We assume it's visual unless specific audio markers exist (which the current prompt avoids).
+        # 3. Fallback: Plain Text
+        print(f"✅ [Bridge] Sending plain vision to callback")
+        
         await self.callback(
             source=InputSource.VISUAL_CHANGE,
             text=clean_text,
