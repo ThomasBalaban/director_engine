@@ -32,6 +32,7 @@ from scene_manager import SceneManager
 from decision_engine import DecisionEngine
 from prompt_constructor import PromptConstructor
 from sensor_bridge import SensorBridge
+from speech_dispatcher import SpeechDispatcher
 
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
@@ -53,6 +54,7 @@ context_compressor = ContextCompressor()
 scene_manager = SceneManager()
 decision_engine = DecisionEngine()
 prompt_constructor = PromptConstructor()
+speech_dispatcher = SpeechDispatcher()
 
 # --- ROBUST LAUNCHER ---
 def get_conda_python_path(env_name):
@@ -117,7 +119,7 @@ def shutdown_vision_app():
         print(f"🛑 [Shutdown] Terminating Vision Subsystem (PID: {vision_process.pid})...")
         try:
             # Kill the entire process group to ensure children die
-            os.killpg(os.getpgid(vision_process.pid), signal.SIGTERM)
+            os.killpg(os.getpgid(vision_process.pid), signal_module.SIGTERM)
             vision_process.wait(timeout=3)
             print("✅ Vision Subsystem stopped.")
         except Exception as e:
@@ -202,12 +204,17 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
                         event, store, profile_manager, handle_analysis_complete
                     ))
 
+
 async def summary_ticker(store: ContextStore):
     global server_ready
     while not server_ready:
         await asyncio.sleep(0.1)
     
     print("✅ Summary ticker starting")
+    
+    # Initialize speech dispatcher
+    await speech_dispatcher.initialize()
+    
     await asyncio.sleep(5) 
     
     while True:
@@ -235,7 +242,23 @@ async def summary_ticker(store: ContextStore):
             directive = decision_engine.generate_directive(
                 store, behavior_engine, adaptive_ctrl, energy_system
             )
-            store.set_directive(directive) 
+            store.set_directive(directive)
+            
+            # ============================================
+            # NEW: PROACTIVE SPEECH DISPATCH
+            # Evaluate if Nami should speak based on current state
+            # ============================================
+            speech_decision = speech_dispatcher.evaluate(
+                store, 
+                behavior_engine, 
+                energy_system, 
+                directive
+            )
+            
+            if speech_decision:
+                print(f"🎤 [Ticker] Speech trigger: {speech_decision.reason}")
+                await speech_dispatcher.dispatch(speech_decision, energy_system)
+            # ============================================
             
             # --- NEURO-FICATION: AWAIT Internal Monologue ---
             thought_text = await behavior_engine.check_internal_monologue(store)
@@ -248,10 +271,8 @@ async def summary_ticker(store: ContextStore):
                     EventScore(interestingness=0.8, conversational_value=1.0, urgency=0.7)
                 )
                 emit_event_scored(thought_event)
-                if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
-                     asyncio.create_task(llm_analyst.analyze_and_update_event(
-                        thought_event, store, profile_manager, handle_analysis_complete
-                    ))
+                # Note: The speech_dispatcher will pick this up on the next tick
+                # if appropriate (goal is ENTERTAIN/TROLL, has energy, etc.)
 
             callback_text = behavior_engine.check_callbacks(store)
             if callback_text:
@@ -263,10 +284,6 @@ async def summary_ticker(store: ContextStore):
                     EventScore(interestingness=0.7, conversational_value=0.8)
                 )
                 emit_event_scored(cb_event)
-                if energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
-                     asyncio.create_task(llm_analyst.analyze_and_update_event(
-                        cb_event, store, profile_manager, handle_analysis_complete
-                    ))
             
             memory_optimizer.decay_memories(store)
             await context_compressor.run_compression_cycle(store)
@@ -334,8 +351,11 @@ async def summary_ticker(store: ContextStore):
 
         except Exception as e:
             print(f"[Director] Error in summary ticker: {e}")
+            import traceback
+            traceback.print_exc()
         
         await asyncio.sleep(config.SUMMARY_INTERVAL_SECONDS)
+
 
 # --- Application Setup ---
 app = FastAPI(title="Nami Director Engine")
@@ -543,6 +563,12 @@ def run_server():
             loop.run_until_complete(llm_analyst.close_http_client())
         except Exception as e:
             print(f"    ⚠️ HTTP client error: {e}")
+
+        print("  [X/X] Closing Speech Dispatcher...")
+        try:
+            loop.run_until_complete(speech_dispatcher.close())
+        except Exception as e:
+            print(f"    ⚠️ Speech dispatcher error: {e}")
         
         # 4. Shutdown Vision App (this triggers its own cleanup)
         print("  [4/4] Shutting down Vision Subsystem...")

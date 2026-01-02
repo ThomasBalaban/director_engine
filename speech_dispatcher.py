@@ -1,0 +1,312 @@
+# Save as: director_engine/speech_dispatcher.py
+"""
+The Speech Dispatcher - Decides when Nami should speak proactively.
+
+This module bridges the Director's "thinking" with Nami's "speaking".
+It monitors the stream state and pushes interjections to Nami when appropriate.
+"""
+
+import time
+import httpx
+from typing import Optional, Dict, Any
+from dataclasses import dataclass
+
+from config import (
+    NAMI_INTERJECT_URL, 
+    ENERGY_COST_INTERJECTION,
+    InputSource,
+    BotGoal,
+    FlowState,
+    ConversationState
+)
+from context_store import ContextStore, EventItem
+from decision_engine import Directive
+from energy_system import EnergySystem
+from behavior_engine import BehaviorEngine
+
+@dataclass
+class SpeechDecision:
+    should_speak: bool
+    reason: str
+    content: str
+    priority: float
+    source_info: Dict[str, Any]
+
+
+class SpeechDispatcher:
+    """
+    Decides when to push speech requests to Nami.
+    
+    Rules:
+    1. Never speak if goal is OBSERVE
+    2. Speak more freely when goal is ENTERTAIN or TROLL
+    3. Respect energy budget
+    4. Don't spam - minimum interval between speeches
+    5. High-priority events (skill issues, victories) always trigger
+    """
+    
+    def __init__(self):
+        self.last_speech_time = 0
+        self.min_speech_interval = 15.0  # Minimum seconds between proactive speeches
+        self.http_client: Optional[httpx.AsyncClient] = None
+        
+        # Track what we've already reacted to (prevent repeats)
+        self.reacted_event_ids: set = set()
+        self.max_tracked_events = 50
+        
+    async def initialize(self):
+        """Initialize the async HTTP client."""
+        if self.http_client is None:
+            self.http_client = httpx.AsyncClient()
+            print("✅ [SpeechDispatcher] Initialized")
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self.http_client:
+            await self.http_client.aclose()
+            self.http_client = None
+    
+    def evaluate(
+        self,
+        store: ContextStore,
+        behavior: BehaviorEngine,
+        energy: EnergySystem,
+        directive: Optional[Directive]
+    ) -> Optional[SpeechDecision]:
+        """
+        Evaluate whether Nami should speak right now.
+        
+        Returns a SpeechDecision if she should speak, None otherwise.
+        """
+        now = time.time()
+        
+        # 1. Check cooldown
+        time_since_last = now - self.last_speech_time
+        if time_since_last < self.min_speech_interval:
+            return None
+        
+        # 2. Check energy
+        if not energy.can_afford(ENERGY_COST_INTERJECTION):
+            return None
+        
+        # 3. Check goal - OBSERVE means stay quiet
+        if behavior.current_goal == BotGoal.OBSERVE:
+            return None
+        
+        # 4. Check flow - Don't interrupt if user is dominating
+        if store.current_flow == FlowState.DOMINATED:
+            return None
+        
+        # 5. Look for trigger events
+        decision = self._find_speech_trigger(store, behavior, directive)
+        
+        return decision
+    
+    def _find_speech_trigger(
+        self,
+        store: ContextStore,
+        behavior: BehaviorEngine,
+        directive: Optional[Directive]
+    ) -> Optional[SpeechDecision]:
+        """
+        Find something worth reacting to.
+        
+        Priority order:
+        1. System patterns (skill issues, victories, memes)
+        2. Internal thoughts (dead air fillers)
+        3. High-interest visual/audio events
+        """
+        
+        # Get recent events we haven't reacted to
+        layers = store.get_all_events_for_summary()
+        immediate = layers['immediate']
+        recent = layers['recent']
+        
+        # --- Priority 1: System Patterns (always react) ---
+        patterns = [e for e in immediate if e.source == InputSource.SYSTEM_PATTERN]
+        for event in patterns:
+            if event.id in self.reacted_event_ids:
+                continue
+                
+            pattern_type = event.metadata.get('type', '')
+            
+            # Skill issue - ALWAYS roast
+            if pattern_type == 'skill_issue':
+                return SpeechDecision(
+                    should_speak=True,
+                    reason="Skill Issue Detected",
+                    content="React to the user's failure. Say 'skill issue' or roast them.",
+                    priority=0.1,  # High priority (lower number)
+                    source_info={
+                        'source': 'DIRECTOR_SKILL_ISSUE',
+                        'use_tts': True,
+                        'event_id': event.id
+                    }
+                )
+            
+            # Victory - Celebrate
+            if pattern_type == 'pattern_victory':
+                return SpeechDecision(
+                    should_speak=True,
+                    reason="Victory Detected",
+                    content="Celebrate the user's win! Be hype!",
+                    priority=0.2,
+                    source_info={
+                        'source': 'DIRECTOR_VICTORY',
+                        'use_tts': True,
+                        'event_id': event.id
+                    }
+                )
+            
+            # Meme moment - React
+            if pattern_type == 'pattern_meme':
+                visual_ref = event.metadata.get('visual_ref', 'something funny')
+                return SpeechDecision(
+                    should_speak=True,
+                    reason="Meme Moment",
+                    content=f"React to this funny moment: {visual_ref}",
+                    priority=0.3,
+                    source_info={
+                        'source': 'DIRECTOR_MEME',
+                        'use_tts': True,
+                        'event_id': event.id
+                    }
+                )
+            
+            # Dead air - Fill silence
+            if pattern_type == 'pattern_void':
+                return SpeechDecision(
+                    should_speak=True,
+                    reason="Dead Air",
+                    content="Fill the awkward silence. Say something random or provocative.",
+                    priority=0.5,
+                    source_info={
+                        'source': 'DIRECTOR_DEAD_AIR',
+                        'use_tts': True,
+                        'event_id': event.id
+                    }
+                )
+            
+            # Fixation (Gymbag effect)
+            if pattern_type == 'fixation':
+                entity = event.metadata.get('entity', 'thing')
+                return SpeechDecision(
+                    should_speak=True,
+                    reason="Visual Fixation",
+                    content=f"You keep seeing a {entity}. Comment on it obsessively.",
+                    priority=0.4,
+                    source_info={
+                        'source': 'DIRECTOR_FIXATION',
+                        'use_tts': True,
+                        'event_id': event.id
+                    }
+                )
+        
+        # --- Priority 2: Internal Thoughts ---
+        thoughts = [e for e in immediate if e.source == InputSource.INTERNAL_THOUGHT]
+        for event in thoughts:
+            if event.id in self.reacted_event_ids:
+                continue
+            
+            return SpeechDecision(
+                should_speak=True,
+                reason="Internal Thought",
+                content=event.text,  # The thought itself is the content
+                priority=0.6,
+                source_info={
+                    'source': 'DIRECTOR_THOUGHT',
+                    'use_tts': True,
+                    'event_id': event.id
+                }
+            )
+        
+        # --- Priority 3: High-Interest Events (Goal-based) ---
+        if behavior.current_goal in [BotGoal.ENTERTAIN, BotGoal.TROLL]:
+            # Look for interesting visual or audio events
+            interesting_events = [
+                e for e in immediate + recent[:3]
+                if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
+                and e.score.interestingness >= 0.7
+                and e.id not in self.reacted_event_ids
+            ]
+            
+            if interesting_events:
+                best = max(interesting_events, key=lambda x: x.score.interestingness)
+                action = "roast" if behavior.current_goal == BotGoal.TROLL else "comment on"
+                
+                return SpeechDecision(
+                    should_speak=True,
+                    reason=f"High Interest Event ({behavior.current_goal.name})",
+                    content=f"You notice: {best.text}. React to it - {action} this.",
+                    priority=0.7,
+                    source_info={
+                        'source': f'DIRECTOR_{best.source.name}',
+                        'use_tts': True,
+                        'event_id': best.id
+                    }
+                )
+        
+        return None
+    
+    async def dispatch(
+        self,
+        decision: SpeechDecision,
+        energy: EnergySystem
+    ) -> bool:
+        """
+        Send the speech request to Nami's interjection endpoint.
+        """
+        if not self.http_client:
+            await self.initialize()
+        
+        # Spend energy
+        if not energy.spend(ENERGY_COST_INTERJECTION):
+            print(f"⚡ [SpeechDispatcher] Not enough energy to speak")
+            return False
+        
+        # Build payload
+        payload = {
+            "content": decision.content,
+            "priority": decision.priority,
+            "source_info": decision.source_info
+        }
+        
+        try:
+            print(f"🎤 [SpeechDispatcher] Pushing to Nami: {decision.reason}")
+            print(f"   Content: {decision.content[:60]}...")
+            
+            response = await self.http_client.post(
+                NAMI_INTERJECT_URL,
+                json=payload,
+                timeout=2.0
+            )
+            
+            if response.status_code == 200:
+                self.last_speech_time = time.time()
+                
+                # Track that we reacted to this event
+                event_id = decision.source_info.get('event_id')
+                if event_id:
+                    self.reacted_event_ids.add(event_id)
+                    # Prevent memory leak
+                    if len(self.reacted_event_ids) > self.max_tracked_events:
+                        # Remove oldest (arbitrary, but works)
+                        self.reacted_event_ids.pop()
+                
+                print(f"✅ [SpeechDispatcher] Nami accepted the interjection")
+                return True
+            else:
+                print(f"❌ [SpeechDispatcher] Nami rejected: {response.status_code}")
+                return False
+                
+        except httpx.ConnectError:
+            print(f"❌ [SpeechDispatcher] Cannot reach Nami at {NAMI_INTERJECT_URL}")
+            return False
+        except Exception as e:
+            print(f"❌ [SpeechDispatcher] Error: {e}")
+            return False
+    
+    def set_speech_interval(self, seconds: float):
+        """Adjust how often Nami can speak proactively."""
+        self.min_speech_interval = max(5.0, seconds)  # Minimum 5 seconds
+        print(f"🎤 [SpeechDispatcher] Speech interval set to {self.min_speech_interval}s")
