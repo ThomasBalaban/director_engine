@@ -14,10 +14,10 @@ from typing import Dict, Any, Optional
 import socketio
 
 import config
-import llm_analyst
-from sensor_bridge import SensorBridge
-import shared
 import process_manager
+import services.llm_analyst as llm_analyst
+from services.sensor_bridge import SensorBridge
+import shared
 import core_logic
 
 # --- APP SETUP ---

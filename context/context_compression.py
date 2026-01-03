@@ -1,7 +1,7 @@
 # Save as: director_engine/context_compression.py
 import time
 import ollama
-from context_store import ContextStore, EventItem
+from context.context_store import ContextStore, EventItem
 from config import OLLAMA_MODEL, COMPRESSION_INTERVAL, InputSource
 
 class ContextCompressor:

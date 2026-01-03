@@ -3,9 +3,9 @@ import asyncio
 import time
 from typing import Dict, Any, Optional
 import config
-import llm_analyst
+import services.llm_analyst as llm_analyst
 from scoring import calculate_event_score, EventScore
-from context_store import EventItem
+from context.context_store import EventItem
 import shared 
 
 # --- EVENT PROCESSOR ---

@@ -2,10 +2,10 @@
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Any
 from config import BotGoal, ConversationState, FlowState, InputSource
-from context_store import ContextStore, EventItem
-from behavior_engine import BehaviorEngine
-from adaptive_controller import AdaptiveController
-from energy_system import EnergySystem
+from context.context_store import ContextStore, EventItem
+from systems.behavior_engine import BehaviorEngine
+from systems.adaptive_controller import AdaptiveController
+from systems.energy_system import EnergySystem
 
 @dataclass
 class Directive:

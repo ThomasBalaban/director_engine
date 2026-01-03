@@ -19,10 +19,10 @@ from config import (
     FlowState,
     ConversationState
 )
-from context_store import ContextStore, EventItem
-from decision_engine import Directive
-from energy_system import EnergySystem
-from behavior_engine import BehaviorEngine
+from context.context_store import ContextStore, EventItem
+from systems.decision_engine import Directive
+from systems.energy_system import EnergySystem
+from systems.behavior_engine import BehaviorEngine
 
 @dataclass
 class SpeechDecision:

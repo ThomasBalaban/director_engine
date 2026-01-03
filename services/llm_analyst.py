@@ -7,8 +7,8 @@ from config import (
     INTERJECTION_THRESHOLD, InputSource, MEMORY_THRESHOLD,
     ConversationState, FlowState, UserIntent 
 )
-from context_store import ContextStore, EventItem
-from user_profile_manager import UserProfileManager
+from context.context_store import ContextStore, EventItem
+from context.user_profile_manager import UserProfileManager
 from scoring import EventScore
 from typing import List, Tuple, Callable, Any, Optional, Dict
 

@@ -4,10 +4,10 @@ import random
 import asyncio
 from typing import List, Optional
 from config import BotGoal, InputSource, ConversationState, FlowState, CURIOSITY_INTERVAL, CALLBACK_INTERVAL
-from context_store import ContextStore, EventItem
+from context.context_store import ContextStore, EventItem
 from scoring import EventScore
-from user_profile_manager import UserProfileManager
-import llm_analyst 
+from context.user_profile_manager import UserProfileManager
+import services.llm_analyst as llm_analyst 
 
 class BehaviorEngine:
     def __init__(self):

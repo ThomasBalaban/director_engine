@@ -2,7 +2,7 @@
 import time
 import re
 from typing import List, Dict, Any
-from context_store import ContextStore
+from context.context_store import ContextStore
 from config import InputSource
 from scoring import EventScore
 

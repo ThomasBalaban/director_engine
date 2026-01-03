@@ -1,9 +1,9 @@
 # Save as: director_engine/memory_ops.py
 import time
 from typing import List, Dict, Any
-from context_store import EventItem, ContextStore
+from context.context_store import EventItem, ContextStore
 from config import MEMORY_DECAY_RATE
-from semantic_memory import SemanticMemoryRetriever
+from context.semantic_memory import SemanticMemoryRetriever
 
 class MemoryOptimizer:
     def __init__(self):

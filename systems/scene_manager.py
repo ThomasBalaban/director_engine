@@ -1,6 +1,6 @@
 # Save as: director_engine/scene_manager.py
 import time
-from context_store import ContextStore
+from context.context_store import ContextStore
 from config import SceneType, InputSource, FlowState, ConversationState
 
 class SceneManager:

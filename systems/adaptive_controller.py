@@ -1,6 +1,6 @@
 # Save as: director_engine/adaptive_controller.py
 from config import INTERJECTION_THRESHOLD
-from context_store import ContextStore, BotAction
+from context.context_store import ContextStore, BotAction
 
 class AdaptiveController:
     def __init__(self):

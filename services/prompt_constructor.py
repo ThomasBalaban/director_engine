@@ -4,8 +4,8 @@ import re
 import google.generativeai as genai # type: ignore
 from google.generativeai.types import HarmCategory, HarmBlockThreshold # type: ignore
 from config import ConversationState, FlowState, InputSource, GEMINI_API_KEY
-from context_store import ContextStore, EventItem
-from decision_engine import Directive
+from context.context_store import ContextStore, EventItem
+from systems.decision_engine import Directive
 
 class PromptConstructor:
     """

@@ -3,18 +3,18 @@ import asyncio
 import socketio
 from typing import Dict, Any, List, Optional
 import config
-from context_store import ContextStore, EventItem
-from user_profile_manager import UserProfileManager
-from adaptive_controller import AdaptiveController
-from correlation_engine import CorrelationEngine
-from energy_system import EnergySystem
-from behavior_engine import BehaviorEngine
-from memory_ops import MemoryOptimizer
-from context_compression import ContextCompressor
-from scene_manager import SceneManager
-from decision_engine import DecisionEngine
-from prompt_constructor import PromptConstructor
-from speech_dispatcher import SpeechDispatcher
+from context.context_store import ContextStore, EventItem
+from context.user_profile_manager import UserProfileManager
+from systems.adaptive_controller import AdaptiveController
+from systems.correlation_engine import CorrelationEngine
+from systems.energy_system import EnergySystem
+from systems.behavior_engine import BehaviorEngine
+from context.memory_ops import MemoryOptimizer
+from context.context_compression import ContextCompressor
+from systems.scene_manager import SceneManager
+from systems.decision_engine import DecisionEngine
+from services.prompt_constructor import PromptConstructor
+from services.speech_dispatcher import SpeechDispatcher
 
 # --- GLOBAL SINGLETONS ---
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
