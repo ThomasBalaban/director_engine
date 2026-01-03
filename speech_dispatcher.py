@@ -38,7 +38,7 @@ class SpeechDispatcher:
     Decides when to push speech requests to Nami.
     
     Rules:
-    1. Never speak if goal is OBSERVE
+    1. Never speak if goal is OBSERVE (REMOVED)
     2. Speak more freely when goal is ENTERTAIN or TROLL
     3. Respect energy budget
     4. Don't spam - minimum interval between speeches
@@ -47,7 +47,7 @@ class SpeechDispatcher:
     
     def __init__(self):
         self.last_speech_time = 0
-        self.min_speech_interval = 15.0  # Minimum seconds between proactive speeches
+        self.min_speech_interval = 3.0  # CHANGED: 3.0s minimum interval (very chatty)
         self.http_client: Optional[httpx.AsyncClient] = None
         
         # Track what we've already reacted to (prevent repeats)
@@ -89,11 +89,11 @@ class SpeechDispatcher:
         if not energy.can_afford(ENERGY_COST_INTERJECTION):
             return None
         
-        # 3. Check goal - OBSERVE means stay quiet
-        if behavior.current_goal == BotGoal.OBSERVE:
-            return None
+        # REMOVED: The check that forced silence during OBSERVE
+        # if behavior.current_goal == BotGoal.OBSERVE:
+        #     return None
         
-        # 4. Check flow - Don't interrupt if user is dominating
+        # 4. Check flow - Don't interrupt if user is dominating (actively speaking long sentences)
         if store.current_flow == FlowState.DOMINATED:
             return None
         
@@ -220,31 +220,36 @@ class SpeechDispatcher:
                 }
             )
         
-        # --- Priority 3: High-Interest Events (Goal-based) ---
-        if behavior.current_goal in [BotGoal.ENTERTAIN, BotGoal.TROLL]:
-            # Look for interesting visual or audio events
-            interesting_events = [
-                e for e in immediate + recent[:3]
-                if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
-                and e.score.interestingness >= 0.7
-                and e.id not in self.reacted_event_ids
-            ]
+        # --- Priority 3: Low-Threshold Events ---
+        # React to anything even remotely interesting (> 0.4)
+        interesting_events = [
+            e for e in immediate + recent[:3]
+            if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
+            and e.score.interestingness >= 0.4  # CHANGED: 0.4 threshold (comments on everything)
+            and e.id not in self.reacted_event_ids
+        ]
+        
+        if interesting_events:
+            best = max(interesting_events, key=lambda x: x.score.interestingness)
             
-            if interesting_events:
-                best = max(interesting_events, key=lambda x: x.score.interestingness)
-                action = "roast" if behavior.current_goal == BotGoal.TROLL else "comment on"
-                
-                return SpeechDecision(
-                    should_speak=True,
-                    reason=f"High Interest Event ({behavior.current_goal.name})",
-                    content=f"You notice: {best.text}. React to it - {action} this.",
-                    priority=0.7,
-                    source_info={
-                        'source': f'DIRECTOR_{best.source.name}',
-                        'use_tts': True,
-                        'event_id': best.id
-                    }
-                )
+            # Dynamic action based on goal
+            action = "comment on"
+            if behavior.current_goal == BotGoal.TROLL:
+                action = "roast" 
+            elif behavior.current_goal == BotGoal.OBSERVE:
+                action = "notice"
+
+            return SpeechDecision(
+                should_speak=True,
+                reason=f"Passive Observation ({best.source.name})",
+                content=f"You notice: {best.text}. React to it - {action} this.",
+                priority=0.7,
+                source_info={
+                    'source': f'DIRECTOR_{best.source.name}',
+                    'use_tts': True,
+                    'event_id': best.id
+                }
+            )
         
         return None
     
@@ -308,5 +313,5 @@ class SpeechDispatcher:
     
     def set_speech_interval(self, seconds: float):
         """Adjust how often Nami can speak proactively."""
-        self.min_speech_interval = max(5.0, seconds)  # Minimum 5 seconds
+        self.min_speech_interval = max(1.0, seconds)
         print(f"🎤 [SpeechDispatcher] Speech interval set to {self.min_speech_interval}s")

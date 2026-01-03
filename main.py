@@ -1,3 +1,4 @@
+# Save as: director_engine/main.py
 import uvicorn
 import asyncio
 import threading
@@ -36,6 +37,7 @@ from speech_dispatcher import SpeechDispatcher
 
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 summary_ticker_task: Optional[asyncio.Task] = None
+reflex_ticker_task: Optional[asyncio.Task] = None  # NEW: Separate task for reflexes
 sensor_bridge_task: Optional[asyncio.Task] = None
 server_ready: bool = False
 
@@ -205,75 +207,51 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
                     ))
 
 
-async def summary_ticker(store: ContextStore):
-    global server_ready
+# =========================================================================
+# NEW: REFLEX TICKER (High Speed, Non-Blocking)
+# Handles: Speaking, Reacting, Shower Thoughts
+# =========================================================================
+async def reflex_ticker(store: ContextStore):
     while not server_ready:
         await asyncio.sleep(0.1)
     
-    print("✅ Summary ticker starting")
-    
-    # Initialize speech dispatcher
+    print("✅ Reflex ticker starting (High Frequency)")
     await speech_dispatcher.initialize()
-    
-    await asyncio.sleep(5) 
     
     while True:
         try:
-            await llm_analyst.generate_summary(store)
-            
-            chat_vel, energy_level = store.get_activity_metrics()
-            new_threshold = adaptive_ctrl.update(chat_vel, energy_level)
-            adaptive_ctrl.process_feedback(store) 
-            
-            scene_manager.update_scene(store)
-            
-            patterns = correlation_engine.correlate(store)
-            for pat in patterns:
-                sys_event = store.add_event(
-                    config.InputSource.SYSTEM_PATTERN, 
-                    pat['text'], 
-                    pat['metadata'], 
-                    pat['score']
-                )
-                emit_event_scored(sys_event)
-
+            # 1. Update Goal based on activity (Fast)
             behavior_engine.update_goal(store)
             
-            directive = decision_engine.generate_directive(
-                store, behavior_engine, adaptive_ctrl, energy_system
-            )
+            # 2. Update Adaptive Thresholds (Fast)
+            chat_vel, energy_level = store.get_activity_metrics()
+            adaptive_ctrl.update(chat_vel, energy_level)
+            
+            # 3. Generate Directive (Needed for speech context)
+            directive = decision_engine.generate_directive(store, behavior_engine, adaptive_ctrl, energy_system)
             store.set_directive(directive)
             
-            # ============================================
-            # NEW: PROACTIVE SPEECH DISPATCH
-            # Evaluate if Nami should speak based on current state
-            # ============================================
-            speech_decision = speech_dispatcher.evaluate(
-                store, 
-                behavior_engine, 
-                energy_system, 
-                directive
-            )
-            
-            if speech_decision:
-                print(f"🎤 [Ticker] Speech trigger: {speech_decision.reason}")
-                await speech_dispatcher.dispatch(speech_decision, energy_system)
-            # ============================================
-            
-            # --- NEURO-FICATION: AWAIT Internal Monologue ---
+            # 4. Check for Internal Monologue (Thoughts)
+            # This triggers LLM but it's faster than full summary. 
+            # We await it here. If it blocks for 1s that's okay, but it generates content to speak.
             thought_text = await behavior_engine.check_internal_monologue(store)
             if thought_text:
-                print(f"💡 [Internal Monologue] {thought_text}")
+                print(f"💡 [Reflex] Thought: {thought_text}")
                 thought_event = store.add_event(
                     config.InputSource.INTERNAL_THOUGHT,
                     thought_text,
                     {"type": "shower_thought", "goal": "fill_silence"},
-                    EventScore(interestingness=0.8, conversational_value=1.0, urgency=0.7)
+                    EventScore(interestingness=0.95, conversational_value=1.0, urgency=0.8)
                 )
                 emit_event_scored(thought_event)
-                # Note: The speech_dispatcher will pick this up on the next tick
-                # if appropriate (goal is ENTERTAIN/TROLL, has energy, etc.)
 
+            # 5. Evaluate Speaking (The "Yap" Check)
+            speech_decision = speech_dispatcher.evaluate(store, behavior_engine, energy_system, directive)
+            if speech_decision:
+                print(f"🎤 [Reflex] Trigger: {speech_decision.reason}")
+                await speech_dispatcher.dispatch(speech_decision, energy_system)
+                
+            # 6. Check Callbacks
             callback_text = behavior_engine.check_callbacks(store)
             if callback_text:
                 print(f"🕰️ [Callback] {callback_text}")
@@ -284,10 +262,69 @@ async def summary_ticker(store: ContextStore):
                     EventScore(interestingness=0.7, conversational_value=0.8)
                 )
                 emit_event_scored(cb_event)
+
+        except Exception as e:
+            print(f"⚠️ [Reflex] Error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Run every 1 second (High speed)
+        await asyncio.sleep(1.0)
+
+
+# =========================================================================
+# ORIGINAL: SUMMARY TICKER (Low Speed, Heavy Processing)
+# Handles: Summarization, Context Compression, UI Updates
+# =========================================================================
+async def summary_ticker(store: ContextStore):
+    global server_ready
+    while not server_ready:
+        await asyncio.sleep(0.1)
+    
+    print("✅ Summary ticker starting (Low Frequency)")
+    
+    # Initialize speech dispatcher (reflex loop does this too, but safe to do twice)
+    # await speech_dispatcher.initialize() 
+    
+    await asyncio.sleep(5) 
+    
+    while True:
+        try:
+            # 1. Heavy LLM Call (Summarization)
+            await llm_analyst.generate_summary(store)
             
+            # 2. Housekeeping
+            # adaptive_ctrl metrics updated in reflex, but we process feedback here
+            adaptive_ctrl.process_feedback(store) 
+            
+            scene_manager.update_scene(store)
+            
+            # 3. Correlation
+            patterns = correlation_engine.correlate(store)
+            for pat in patterns:
+                sys_event = store.add_event(
+                    config.InputSource.SYSTEM_PATTERN, 
+                    pat['text'], 
+                    pat['metadata'], 
+                    pat['score']
+                )
+                emit_event_scored(sys_event)
+
+            # NOTE: Behavior updates moved to Reflex Loop
+            # behavior_engine.update_goal(store)
+            # directive = decision_engine.generate_directive(...)
+            # store.set_directive(directive)
+            
+            # NOTE: Speech logic moved to Reflex Loop
+            # speech_dispatcher.evaluate(...)
+            # behavior_engine.check_internal_monologue(...)
+            # behavior_engine.check_callbacks(...)
+            
+            # 4. Memory Maintenance
             memory_optimizer.decay_memories(store)
             await context_compressor.run_compression_cycle(store)
 
+            # 5. UI Updates / Director State
             summary_data = store.get_summary_data()
             
             current_context_query = summary_data.get('summary', "")
@@ -318,6 +355,9 @@ async def summary_ticker(store: ContextStore):
                         "type": "narrative"
                     })
 
+            # Get updated metrics for UI (Activity metrics might have changed in reflex)
+            chat_vel, energy_level = store.get_activity_metrics()
+            
             emit_director_state(
                 summary=summary_data['summary'],
                 raw_context=summary_data['raw_context'],
@@ -330,7 +370,7 @@ async def summary_ticker(store: ContextStore):
                 memories=memories_list,
                 directive=summary_data['directive'].to_dict() if summary_data['directive'] else None,
                 adaptive_state={
-                    "threshold": round(new_threshold, 2),
+                    "threshold": round(adaptive_ctrl.current_threshold, 2),
                     "state": adaptive_ctrl.state_label,
                     "chat_velocity": round(chat_vel, 1),
                     "energy": round(energy_level, 2),
@@ -354,6 +394,7 @@ async def summary_ticker(store: ContextStore):
             import traceback
             traceback.print_exc()
         
+        # Run every 5 seconds (Slower)
         await asyncio.sleep(config.SUMMARY_INTERVAL_SECONDS)
 
 
@@ -497,14 +538,16 @@ def open_browser():
     except: pass
 
 def run_server():
-    global ui_event_loop, summary_ticker_task, server_ready, sensor_bridge_task
+    global ui_event_loop, summary_ticker_task, reflex_ticker_task, server_ready, sensor_bridge_task
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     ui_event_loop = loop
     
     loop.run_until_complete(llm_analyst.create_http_client())
     
+    # LAUNCH TWO TICKERS
     summary_ticker_task = loop.create_task(summary_ticker(store))
+    reflex_ticker_task = loop.create_task(reflex_ticker(store)) # New Reflex Task
     
     sensor_bridge = SensorBridge(
         vision_uri="ws://localhost:8003", 
@@ -540,7 +583,7 @@ def run_server():
         server_ready = False
         
         # 1. Cancel sensor bridge (this closes WebSocket connections)
-        print("  [1/4] Stopping Sensor Bridge...")
+        print("  [1/5] Stopping Sensor Bridge...")
         if sensor_bridge_task and not sensor_bridge_task.done():
             sensor_bridge_task.cancel()
             try:
@@ -549,16 +592,25 @@ def run_server():
                 pass
         
         # 2. Cancel summary ticker
-        print("  [2/4] Stopping Summary Ticker...")
+        print("  [2/5] Stopping Summary Ticker...")
         if summary_ticker_task and not summary_ticker_task.done():
             summary_ticker_task.cancel()
             try:
                 loop.run_until_complete(asyncio.wait_for(summary_ticker_task, timeout=2.0))
             except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+
+        # 3. Cancel reflex ticker
+        print("  [3/5] Stopping Reflex Ticker...")
+        if reflex_ticker_task and not reflex_ticker_task.done():
+            reflex_ticker_task.cancel()
+            try:
+                loop.run_until_complete(asyncio.wait_for(reflex_ticker_task, timeout=2.0))
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
         
-        # 3. Close HTTP client
-        print("  [3/4] Closing HTTP clients...")
+        # 4. Close HTTP client
+        print("  [4/5] Closing HTTP clients...")
         try:
             loop.run_until_complete(llm_analyst.close_http_client())
         except Exception as e:
@@ -570,8 +622,8 @@ def run_server():
         except Exception as e:
             print(f"    ⚠️ Speech dispatcher error: {e}")
         
-        # 4. Shutdown Vision App (this triggers its own cleanup)
-        print("  [4/4] Shutting down Vision Subsystem...")
+        # 5. Shutdown Vision App (this triggers its own cleanup)
+        print("  [5/5] Shutting down Vision Subsystem...")
         shutdown_vision_app()
         
         # Give vision app a moment to clean up

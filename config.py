@@ -21,14 +21,14 @@ class InputSource(Enum):
 
 SOURCE_WEIGHTS = {
     InputSource.DIRECT_MICROPHONE: 0.8,
-    InputSource.TWITCH_MENTION: 0.7,
-    InputSource.AMBIENT_AUDIO: 0.3,
-    InputSource.VISUAL_CHANGE: 0.4,
-    InputSource.TWITCH_CHAT: 0.2,
+    InputSource.TWITCH_MENTION: 0.8,
+    InputSource.AMBIENT_AUDIO: 0.7,      # INCREASED: Listen to game audio
+    InputSource.VISUAL_CHANGE: 0.95,     # MAXED: Vision is primary
+    InputSource.TWITCH_CHAT: 0.3,
     InputSource.MICROPHONE: 0.5,
     InputSource.BOT_TWITCH_REPLY: 0.0,
     InputSource.SYSTEM_PATTERN: 0.95,
-    InputSource.INTERNAL_THOUGHT: 0.6
+    InputSource.INTERNAL_THOUGHT: 0.95   # MAXED: Thoughts must be voiced
 }
 
 class ConversationState(Enum):
@@ -72,16 +72,16 @@ class SceneType(Enum):
 
 # --- Energy System Config ---
 ENERGY_MAX = 100.0
-ENERGY_REGEN_PER_SEC = 4.0
-ENERGY_COST_INTERJECTION = 25.0
-ENERGY_COST_REPLY = 10.0
+ENERGY_REGEN_PER_SEC = 5.0       # INCREASED: Unlimited yapping
+ENERGY_COST_INTERJECTION = 5.0   # LOWERED: Very cheap to speak
+ENERGY_COST_REPLY = 5.0
 ENERGY_COST_PATTERN = 5.0
 
 # --- Memory & Proactivity Config ---
 MEMORY_DECAY_RATE = 0.05 
 MEMORY_RETRIEVAL_LIMIT = 5
-CURIOSITY_INTERVAL = 30.0 
-CALLBACK_INTERVAL = 60.0 
+CURIOSITY_INTERVAL = 8.0         # LOWERED: Bored every 8s
+CALLBACK_INTERVAL = 45.0 
 COMPRESSION_INTERVAL = 30.0 
 
 # --- Director Config ---

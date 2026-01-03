@@ -95,12 +95,13 @@ class BehaviorEngine:
         now = time.time()
         if now - self.last_curiosity_check < CURIOSITY_INTERVAL: return None
         
-        # Neuro Logic: If flow is DEAD_AIR or IDLE with low velocity -> Ramble
         chat_vel, _ = store.get_activity_metrics()
         
+        # AGGRESSIVE LOGIC: Ramble unless flow is specifically DOMINATED (user talking a lot)
+        # Also ramble if chat is even moderately slow (< 5 msg/sec)
         should_ramble = (
-            store.current_flow == FlowState.DEAD_AIR or 
-            (store.current_conversation_state == ConversationState.IDLE and chat_vel < 1.0)
+            store.current_flow != FlowState.DOMINATED or 
+            chat_vel < 5.0 
         )
         
         if not should_ramble:
@@ -115,7 +116,7 @@ class BehaviorEngine:
         elif store.current_entities:
             topic = f"the {random.choice(store.current_entities)}"
             
-        print(f"💭 [Monologue] Dead air detected. Generating thought about: {topic}")
+        print(f"💭 [Monologue] Generating thought about: {topic}")
         
         # Call LLM to generate the thought text
         thought = await llm_analyst.generate_thought(f"A weird theory about {topic}")
