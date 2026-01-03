@@ -28,7 +28,7 @@ def launch_vision_app():
     print("\n👁️ [Launcher] Attempting to start Vision Subsystem...")
     
     current_dir = Path(__file__).parent.resolve()
-    workspace_root = current_dir.parent
+    workspace_root = current_dir.parent.parent
     vision_app_path = workspace_root / "desktop_mon_gemini"
     
     if not vision_app_path.exists():

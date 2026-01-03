@@ -43,18 +43,20 @@ class SensorBridge:
                             
                             # DEBUG: Print ALL messages except heartbeat
                             if msg_type != "heartbeat":
-                                print(f"📨 [Bridge] RAW MESSAGE: type={msg_type}, keys={list(data.keys())}")
+                                # print(f"📨 [Bridge] RAW MESSAGE: type={msg_type}, keys={list(data.keys())}")
+                                print('')
+
                             
                             # Handle vision updates
                             if msg_type == "text_update":
                                 content = data.get("content", "")
                                 if content:
-                                    print(f"👁️ [Bridge] Vision update: {content[:60]}...")
+                                    # print(f"👁️ [Bridge] Vision update: {content[:60]}...")
                                     await self._parse_gemini_content(content)
                             
                             # Handle transcripts
                             elif msg_type in ["transcript", "partial_transcript"]:
-                                print(f"👂 [Bridge] Transcript: {data.get('text', '')[:60]}...")
+                                # print(f"👂 [Bridge] Transcript: {data.get('text', '')[:60]}...")
                                 await self._parse_whisper_content(data)
                                 
                         except json.JSONDecodeError as e:
@@ -120,7 +122,7 @@ class SensorBridge:
                 text=text,
                 metadata=meta
             )
-            print(f"✅ [Bridge] Callback completed successfully")
+            # print(f"✅ [Bridge] Callback completed successfully")
         except Exception as e:
             print(f"❌ [Bridge] Callback error: {e}")
             import traceback
