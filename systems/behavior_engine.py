@@ -85,20 +85,23 @@ class BehaviorEngine:
                 return f"Wait, you never told me: {debt.text}"
         return None
 
-    # --- [NEURO-FICATION: Internal Monologue] ---
     async def check_internal_monologue(self, store: ContextStore) -> Optional[str]:
         """
-        Replaces the old 'Curiosity' check.
-        If Dead Air is detected, generates a 'Shower Thought' or 'Conspiracy'
-        instead of asking a helpful question.
+        Generates a 'Shower Thought' or random comment during silence.
         """
         now = time.time()
-        if now - self.last_curiosity_check < CURIOSITY_INTERVAL: return None
+        if now - self.last_curiosity_check < CURIOSITY_INTERVAL: 
+            return None
+        
+        # NEW: Import and check the speech dispatcher's cooldown
+        import shared
+        time_since_user_response = now - shared.speech_dispatcher.last_user_response_time
+        if time_since_user_response < shared.speech_dispatcher.post_response_cooldown:
+            # Don't generate thoughts right after responding to user
+            return None
         
         chat_vel, _ = store.get_activity_metrics()
         
-        # AGGRESSIVE LOGIC: Ramble unless flow is specifically DOMINATED (user talking a lot)
-        # Also ramble if chat is even moderately slow (< 5 msg/sec)
         should_ramble = (
             store.current_flow != FlowState.DOMINATED or 
             chat_vel < 5.0 

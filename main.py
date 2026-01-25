@@ -105,11 +105,13 @@ async def receive_bot_reply(sid, payload: dict):
         payload.get('filtered_area')  # ADD THIS
     )
 
-# --- NEW: Speech state socket handlers ---
+    shared.speech_dispatcher.register_user_response()
+
 @shared.sio.on("speech_started")
 async def handle_speech_started(sid, payload: dict = None):
     """Called when Nami starts speaking (TTS begins)"""
-    shared.set_nami_speaking(True)
+    source = payload.get('source', 'UNKNOWN') if payload else 'UNKNOWN'
+    shared.set_nami_speaking(True, source=source)
 
 @shared.sio.on("speech_finished")
 async def handle_speech_finished(sid, payload: dict = None):

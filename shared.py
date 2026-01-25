@@ -27,17 +27,38 @@ server_ready: bool = False
 nami_is_speaking: bool = False
 speech_started_time: float = 0.0
 SPEECH_TIMEOUT: float = 60.0  # Max time to wait for speech_finished (failsafe)
+last_speech_source: Optional[str] = None  # 'USER_DIRECT', 'IDLE_THOUGHT', etc.
+awaiting_user_response: bool = False  # True if we just responded to user and are waiting
 
-def set_nami_speaking(is_speaking: bool):
+def set_nami_speaking(is_speaking: bool, source: str = None):
     """Thread-safe setter for speech state."""
-    global nami_is_speaking, speech_started_time
+    global nami_is_speaking, speech_started_time, last_speech_source, awaiting_user_response
     nami_is_speaking = is_speaking
     if is_speaking:
         speech_started_time = time.time()
-        print("🔇 [Speech Lock] Nami started speaking - Director paused")
+        if source:
+            last_speech_source = source
+        print(f"🔇 [Speech Lock] Nami started speaking (source: {source}) - Director paused")
     else:
         duration = time.time() - speech_started_time if speech_started_time else 0
-        print(f"🔊 [Speech Lock] Nami finished speaking ({duration:.1f}s) - Director resumed")
+        print(f"🔊 [Speech Lock] Nami finished speaking ({duration:.1f}s, was: {last_speech_source}) - Director resumed")
+        
+        # If we just finished responding to user, set awaiting flag
+        if last_speech_source == 'USER_DIRECT':
+            awaiting_user_response = True
+            print(f"⏳ [Speech Lock] Awaiting user response - idle suppressed")
+
+def clear_user_awaiting():
+    """Call this when user speaks again, clearing the awaiting state."""
+    global awaiting_user_response
+    if awaiting_user_response:
+        print(f"✅ [Speech Lock] User responded - idle can resume")
+    awaiting_user_response = False
+
+def should_suppress_idle() -> bool:
+    """Returns True if idle thoughts should be suppressed."""
+    global awaiting_user_response, nami_is_speaking
+    return nami_is_speaking or awaiting_user_response
 
 def is_nami_speaking() -> bool:
     """Check if Nami is currently speaking (with timeout failsafe)."""

@@ -36,37 +36,19 @@ class SpeechDecision:
 
 
 class SpeechDispatcher:
-    """
-    Decides when to push speech requests to Nami.
-    
-    Rules:
-    1. NEVER speak if Nami is currently speaking (NEW!)
-    2. Speak more freely when goal is ENTERTAIN or TROLL
-    3. Respect energy budget
-    4. Don't spam - minimum interval between speeches
-    5. High-priority events (skill issues, victories) always trigger
-    """
-    
     def __init__(self):
         self.last_speech_time = 0
-        self.min_speech_interval = 3.0  # 3.0s minimum interval (very chatty)
+        self.min_speech_interval = 3.0  # Minimum between dispatches
+        self.post_response_cooldown = 10.0  # NEW: Cooldown after Nami responds to user
+        self.last_user_response_time = 0  # NEW: Track when Nami last responded to user
         self.http_client: Optional[httpx.AsyncClient] = None
-        
-        # Track what we've already reacted to (prevent repeats)
         self.reacted_event_ids: set = set()
         self.max_tracked_events = 50
-        
-    async def initialize(self):
-        """Initialize the async HTTP client."""
-        if self.http_client is None:
-            self.http_client = httpx.AsyncClient()
-            print("✅ [SpeechDispatcher] Initialized")
     
-    async def close(self):
-        """Close the HTTP client."""
-        if self.http_client:
-            await self.http_client.aclose()
-            self.http_client = None
+    def register_user_response(self):
+        """Call this when Nami responds to a direct user interaction."""
+        self.last_user_response_time = time.time()
+        print(f"🎯 [SpeechDispatcher] User response registered - cooldown active for {self.post_response_cooldown}s")
     
     def evaluate(
         self,
@@ -77,31 +59,33 @@ class SpeechDispatcher:
     ) -> Optional[SpeechDecision]:
         """
         Evaluate whether Nami should speak right now.
-        
-        Returns a SpeechDecision if she should speak, None otherwise.
         """
-        # --- NEW: Import and check speech state ---
         import shared
         if shared.is_nami_speaking():
-            # Nami is currently speaking - don't interrupt!
             return None
         
         now = time.time()
         
-        # 1. Check cooldown
+        # Check cooldown from last dispatch
         time_since_last = now - self.last_speech_time
         if time_since_last < self.min_speech_interval:
             return None
         
-        # 2. Check energy
+        # NEW: Check post-response cooldown (don't interrupt after responding to user)
+        time_since_user_response = now - self.last_user_response_time
+        if time_since_user_response < self.post_response_cooldown:
+            # Still in cooldown after responding to user
+            return None
+        
+        # Check energy
         if not energy.can_afford(ENERGY_COST_INTERJECTION):
             return None
         
-        # 3. Check flow - Don't interrupt if user is dominating (actively speaking long sentences)
+        # Check flow - Don't interrupt if user is dominating
         if store.current_flow == FlowState.DOMINATED:
             return None
         
-        # 4. Look for trigger events
+        # Look for trigger events
         decision = self._find_speech_trigger(store, behavior, directive)
         
         return decision

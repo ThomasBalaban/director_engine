@@ -10,6 +10,9 @@ import shared
 
 # --- EVENT PROCESSOR ---
 async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
+    if source in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.TWITCH_MENTION]:
+        shared.clear_user_awaiting()
+    
     # 1. UI Emit
     if source == config.InputSource.VISUAL_CHANGE:
         shared.emit_vision_context(text)
@@ -92,9 +95,8 @@ async def reflex_ticker():
             directive = shared.decision_engine.generate_directive(shared.store, shared.behavior_engine, shared.adaptive_ctrl, shared.energy_system)
             shared.store.set_directive(directive)
             
-            # ONLY skip thought generation and speech dispatch if Nami is speaking
-            # Everything else (metrics, directive, etc.) still runs
-            if not shared.is_nami_speaking():
+            # Use the new check that respects user-response state
+            if not shared.should_suppress_idle():
                 thought_text = await shared.behavior_engine.check_internal_monologue(shared.store)
                 if thought_text:
                     print(f"💡 [Reflex] Thought: {thought_text}")
@@ -119,14 +121,14 @@ async def reflex_ticker():
                     )
                     shared.emit_event_scored(cb_event)
             else:
-                # Log that we're waiting (optional, for debugging)
-                pass  # Silently wait while Nami speaks
-                
+                if shared.awaiting_user_response:
+                    pass  # Silently wait for user to respond
+                    
         except Exception as e:
             print(f"⚠️ [Reflex] Error: {e}")
         await asyncio.sleep(1.0)
 
-
+        
 async def summary_ticker():
     while not shared.server_ready: await asyncio.sleep(0.1)
     print("✅ Summary ticker starting (Low Frequency)")
