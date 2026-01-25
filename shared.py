@@ -91,8 +91,8 @@ def emit_audio_context(context, is_partial=False):
 def emit_twitch_message(username, message): 
     _emit_threadsafe('twitch_message', {'username': username, 'message': message})
 
-def emit_bot_reply(reply, prompt="", is_censored=False): 
-    _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored})
+def emit_bot_reply(reply, prompt="", is_censored=False, censorship_reason=None): 
+    _emit_threadsafe('bot_reply', {'reply': reply, 'prompt': prompt, 'is_censored': is_censored, 'censorship_reason': censorship_reason})
 
 def emit_event_scored(event: EventItem):
     _emit_threadsafe('event_scored', {

@@ -97,7 +97,15 @@ async def ingest_event(sid, payload: dict):
 
 @shared.sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
-    shared.emit_bot_reply(payload.get('reply', ''), payload.get('prompt', ''), payload.get('is_censored', False))
+    # Extract the new field
+    reason = payload.get('censorship_reason')
+    
+    shared.emit_bot_reply(
+        payload.get('reply', ''), 
+        payload.get('prompt', ''), 
+        payload.get('is_censored', False),
+        reason
+    )
 
 # --- NEW: Speech state socket handlers ---
 @shared.sio.on("speech_started")

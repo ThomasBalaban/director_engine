@@ -320,14 +320,23 @@ socket.on('twitch_message', (data) => {
 socket.on('bot_reply', (data) => {
     const sanitizedReply = sanitizeHTML(data.reply);
     const isCensored = data.is_censored || false;
+    
+    // --- FIX: Define 'reason' so the script doesn't crash ---
+    const reason = data.censorship_reason || "Unknown Policy"; 
+    
     const censorshipClass = isCensored ? 'censored-reply' : '';
-    const censorshipIndicator = isCensored ? '<span class="censored-indicator">🚨 FILTERED</span>' : '';
+    const censorshipIndicator = isCensored ? 
+        `<span class="censored-indicator">🚨 FILTERED (${reason})</span>` : '';
 
     const namiHTML = `<div class="log-line nami-reply cursor-pointer ${censorshipClass}" onclick="openDrawer(this)" 
-        data-reply="${encodeURIComponent(data.reply)}" data-sent="${encodeURIComponent(data.prompt)}" data-censored="${isCensored}">
+        data-reply="${encodeURIComponent(data.reply)}" 
+        data-sent="${encodeURIComponent(data.prompt)}" 
+        data-censored="${isCensored}"
+        data-reason="${encodeURIComponent(reason)}">
         <strong>Nami:</strong> ${sanitizedReply}${censorshipIndicator}
         <span class="ml-2 opacity-0 group-hover:opacity-100 text-xs text-gray-400 align-middle">📄 Context</span></div>`;
     
+    // This line will now run correctly
     appendLog(document.getElementById('nami-replies'), namiHTML);
 
     const chatHTML = `
@@ -343,12 +352,18 @@ window.openDrawer = function(el) {
     const sent = decodeURIComponent(el.getAttribute('data-sent'));
     const replyRaw = decodeURIComponent(el.getAttribute('data-reply'));
     const isCensored = el.getAttribute('data-censored') === 'true';
+    const reason = decodeURIComponent(el.getAttribute('data-reason') || 'Unknown');
     
     document.getElementById('drawer-sent').textContent = sent;
     const replyEl = document.getElementById('drawer-reply');
     
     if (isCensored) {
-        replyEl.innerHTML = `<div style="color: #ef4444; font-weight: 600; margin-bottom: 0.5rem;">🚨 CONTENT FILTERED - Original Response:</div>`;
+        replyEl.innerHTML = `
+            <div class="mb-2 p-2 bg-red-900/30 border border-red-500 rounded text-red-200 text-xs">
+                <strong>Safety Trigger:</strong> Banned content detected ("${reason}")
+            </div>
+            <div style="color: #ef4444; font-weight: 600; margin-bottom: 0.5rem;">🚨 ORIGINAL FILTERED RESPONSE:</div>
+        `;
         const textEl = document.createElement('div');
         textEl.textContent = replyRaw;
         replyEl.appendChild(textEl);

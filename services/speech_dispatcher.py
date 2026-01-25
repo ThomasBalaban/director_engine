@@ -229,7 +229,7 @@ class SpeechDispatcher:
         interesting_events = [
             e for e in immediate + recent[:3]
             if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
-            and e.score.interestingness >= 0.4  # 0.4 threshold (comments on everything)
+            and e.score.interestingness >= 0.25  # Increased sensitivity
             and e.id not in self.reacted_event_ids
         ]
         
