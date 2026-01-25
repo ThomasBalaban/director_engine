@@ -78,7 +78,6 @@ def handle_analysis_complete(event: EventItem):
     shared.emit_event_scored(event)
 
 # --- TICKERS ---
-
 async def reflex_ticker():
     while not shared.server_ready: await asyncio.sleep(0.1)
     print("✅ Reflex ticker starting (High Frequency)")
@@ -93,32 +92,40 @@ async def reflex_ticker():
             directive = shared.decision_engine.generate_directive(shared.store, shared.behavior_engine, shared.adaptive_ctrl, shared.energy_system)
             shared.store.set_directive(directive)
             
-            thought_text = await shared.behavior_engine.check_internal_monologue(shared.store)
-            if thought_text:
-                print(f"💡 [Reflex] Thought: {thought_text}")
-                thought_event = shared.store.add_event(
-                    config.InputSource.INTERNAL_THOUGHT, thought_text,
-                    {"type": "shower_thought", "goal": "fill_silence"},
-                    EventScore(interestingness=0.95, conversational_value=1.0, urgency=0.8)
-                )
-                shared.emit_event_scored(thought_event)
+            # ONLY skip thought generation and speech dispatch if Nami is speaking
+            # Everything else (metrics, directive, etc.) still runs
+            if not shared.is_nami_speaking():
+                thought_text = await shared.behavior_engine.check_internal_monologue(shared.store)
+                if thought_text:
+                    print(f"💡 [Reflex] Thought: {thought_text}")
+                    thought_event = shared.store.add_event(
+                        config.InputSource.INTERNAL_THOUGHT, thought_text,
+                        {"type": "shower_thought", "goal": "fill_silence"},
+                        EventScore(interestingness=0.95, conversational_value=1.0, urgency=0.8)
+                    )
+                    shared.emit_event_scored(thought_event)
 
-            speech_decision = shared.speech_dispatcher.evaluate(shared.store, shared.behavior_engine, shared.energy_system, directive)
-            if speech_decision:
-                print(f"🎤 [Reflex] Trigger: {speech_decision.reason}")
-                await shared.speech_dispatcher.dispatch(speech_decision, shared.energy_system)
+                speech_decision = shared.speech_dispatcher.evaluate(shared.store, shared.behavior_engine, shared.energy_system, directive)
+                if speech_decision:
+                    print(f"🎤 [Reflex] Trigger: {speech_decision.reason}")
+                    await shared.speech_dispatcher.dispatch(speech_decision, shared.energy_system)
+                    
+                callback_text = shared.behavior_engine.check_callbacks(shared.store)
+                if callback_text:
+                    cb_event = shared.store.add_event(
+                        config.InputSource.INTERNAL_THOUGHT, callback_text,
+                        {"type": "callback", "goal": "context_continuity"},
+                        EventScore(interestingness=0.7, conversational_value=0.8)
+                    )
+                    shared.emit_event_scored(cb_event)
+            else:
+                # Log that we're waiting (optional, for debugging)
+                pass  # Silently wait while Nami speaks
                 
-            callback_text = shared.behavior_engine.check_callbacks(shared.store)
-            if callback_text:
-                cb_event = shared.store.add_event(
-                    config.InputSource.INTERNAL_THOUGHT, callback_text,
-                    {"type": "callback", "goal": "context_continuity"},
-                    EventScore(interestingness=0.7, conversational_value=0.8)
-                )
-                shared.emit_event_scored(cb_event)
         except Exception as e:
             print(f"⚠️ [Reflex] Error: {e}")
         await asyncio.sleep(1.0)
+
 
 async def summary_ticker():
     while not shared.server_ready: await asyncio.sleep(0.1)

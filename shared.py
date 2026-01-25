@@ -52,6 +52,8 @@ def is_nami_speaking() -> bool:
         nami_is_speaking = False
         return False
     
+    # DEBUG: Log when we're blocking
+    print(f"🔇 [Speech Lock] Blocking - Nami is speaking (elapsed: {time.time() - speech_started_time:.1f}s)")
     return True
 
 # --- ENGINE INITIALIZATION ---
