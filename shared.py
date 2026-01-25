@@ -1,6 +1,7 @@
 # Save as: director_engine/shared.py
 import asyncio
 import socketio
+import time
 from typing import Dict, Any, List, Optional
 import config
 from context.context_store import ContextStore, EventItem
@@ -20,6 +21,38 @@ from services.speech_dispatcher import SpeechDispatcher
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 server_ready: bool = False
+
+# --- SPEECH STATE TRACKING ---
+# Prevents Director from sending interjections while Nami is speaking
+nami_is_speaking: bool = False
+speech_started_time: float = 0.0
+SPEECH_TIMEOUT: float = 60.0  # Max time to wait for speech_finished (failsafe)
+
+def set_nami_speaking(is_speaking: bool):
+    """Thread-safe setter for speech state."""
+    global nami_is_speaking, speech_started_time
+    nami_is_speaking = is_speaking
+    if is_speaking:
+        speech_started_time = time.time()
+        print("🔇 [Speech Lock] Nami started speaking - Director paused")
+    else:
+        duration = time.time() - speech_started_time if speech_started_time else 0
+        print(f"🔊 [Speech Lock] Nami finished speaking ({duration:.1f}s) - Director resumed")
+
+def is_nami_speaking() -> bool:
+    """Check if Nami is currently speaking (with timeout failsafe)."""
+    global nami_is_speaking, speech_started_time
+    
+    if not nami_is_speaking:
+        return False
+    
+    # Failsafe: If speech has been "ongoing" for too long, assume it finished
+    if speech_started_time and (time.time() - speech_started_time) > SPEECH_TIMEOUT:
+        print(f"⚠️ [Speech Lock] Timeout reached ({SPEECH_TIMEOUT}s) - forcing unlock")
+        nami_is_speaking = False
+        return False
+    
+    return True
 
 # --- ENGINE INITIALIZATION ---
 store = ContextStore()

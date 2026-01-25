@@ -71,6 +71,21 @@ async def get_breadcrumbs(count: int = 3):
     )
     return {"formatted_context": formatted_context}
 
+# --- NEW: Speech state endpoint for HTTP fallback ---
+@app.get("/speech_state")
+async def get_speech_state():
+    return {"is_speaking": shared.is_nami_speaking()}
+
+@app.post("/speech_started")
+async def speech_started():
+    shared.set_nami_speaking(True)
+    return {"status": "ok"}
+
+@app.post("/speech_finished")
+async def speech_finished():
+    shared.set_nami_speaking(False)
+    return {"status": "ok"}
+
 # --- SOCKET HANDLERS ---
 @shared.sio.on("event")
 async def ingest_event(sid, payload: dict):
@@ -83,6 +98,17 @@ async def ingest_event(sid, payload: dict):
 @shared.sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
     shared.emit_bot_reply(payload.get('reply', ''), payload.get('prompt', ''), payload.get('is_censored', False))
+
+# --- NEW: Speech state socket handlers ---
+@shared.sio.on("speech_started")
+async def handle_speech_started(sid, payload: dict = None):
+    """Called when Nami starts speaking (TTS begins)"""
+    shared.set_nami_speaking(True)
+
+@shared.sio.on("speech_finished")
+async def handle_speech_finished(sid, payload: dict = None):
+    """Called when Nami finishes speaking (TTS complete)"""
+    shared.set_nami_speaking(False)
 
 # --- SERVER LIFECYCLE ---
 def open_browser():

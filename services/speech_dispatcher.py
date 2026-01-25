@@ -1,9 +1,11 @@
-# Save as: director_engine/speech_dispatcher.py
+# Save as: director_engine/services/speech_dispatcher.py
 """
 The Speech Dispatcher - Decides when Nami should speak proactively.
 
 This module bridges the Director's "thinking" with Nami's "speaking".
 It monitors the stream state and pushes interjections to Nami when appropriate.
+
+NEW: Now checks if Nami is currently speaking before dispatching.
 """
 
 import time
@@ -38,7 +40,7 @@ class SpeechDispatcher:
     Decides when to push speech requests to Nami.
     
     Rules:
-    1. Never speak if goal is OBSERVE (REMOVED)
+    1. NEVER speak if Nami is currently speaking (NEW!)
     2. Speak more freely when goal is ENTERTAIN or TROLL
     3. Respect energy budget
     4. Don't spam - minimum interval between speeches
@@ -47,7 +49,7 @@ class SpeechDispatcher:
     
     def __init__(self):
         self.last_speech_time = 0
-        self.min_speech_interval = 3.0  # CHANGED: 3.0s minimum interval (very chatty)
+        self.min_speech_interval = 3.0  # 3.0s minimum interval (very chatty)
         self.http_client: Optional[httpx.AsyncClient] = None
         
         # Track what we've already reacted to (prevent repeats)
@@ -78,6 +80,12 @@ class SpeechDispatcher:
         
         Returns a SpeechDecision if she should speak, None otherwise.
         """
+        # --- NEW: Import and check speech state ---
+        import shared
+        if shared.is_nami_speaking():
+            # Nami is currently speaking - don't interrupt!
+            return None
+        
         now = time.time()
         
         # 1. Check cooldown
@@ -89,15 +97,11 @@ class SpeechDispatcher:
         if not energy.can_afford(ENERGY_COST_INTERJECTION):
             return None
         
-        # REMOVED: The check that forced silence during OBSERVE
-        # if behavior.current_goal == BotGoal.OBSERVE:
-        #     return None
-        
-        # 4. Check flow - Don't interrupt if user is dominating (actively speaking long sentences)
+        # 3. Check flow - Don't interrupt if user is dominating (actively speaking long sentences)
         if store.current_flow == FlowState.DOMINATED:
             return None
         
-        # 5. Look for trigger events
+        # 4. Look for trigger events
         decision = self._find_speech_trigger(store, behavior, directive)
         
         return decision
@@ -225,7 +229,7 @@ class SpeechDispatcher:
         interesting_events = [
             e for e in immediate + recent[:3]
             if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
-            and e.score.interestingness >= 0.4  # CHANGED: 0.4 threshold (comments on everything)
+            and e.score.interestingness >= 0.4  # 0.4 threshold (comments on everything)
             and e.id not in self.reacted_event_ids
         ]
         
@@ -261,6 +265,12 @@ class SpeechDispatcher:
         """
         Send the speech request to Nami's interjection endpoint.
         """
+        # --- NEW: Double-check speech state before sending ---
+        import shared
+        if shared.is_nami_speaking():
+            print(f"🔇 [SpeechDispatcher] Blocked dispatch - Nami is still speaking")
+            return False
+        
         if not self.http_client:
             await self.initialize()
         
