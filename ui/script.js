@@ -320,23 +320,23 @@ socket.on('twitch_message', (data) => {
 socket.on('bot_reply', (data) => {
     const sanitizedReply = sanitizeHTML(data.reply);
     const isCensored = data.is_censored || false;
-    
-    // --- FIX: Define 'reason' so the script doesn't crash ---
     const reason = data.censorship_reason || "Unknown Policy"; 
+    const filteredArea = data.filtered_area || "";
     
     const censorshipClass = isCensored ? 'censored-reply' : '';
     const censorshipIndicator = isCensored ? 
         `<span class="censored-indicator">🚨 FILTERED (${reason})</span>` : '';
 
+    // IMPORTANT: Make sure ALL data attributes are set here
     const namiHTML = `<div class="log-line nami-reply cursor-pointer ${censorshipClass}" onclick="openDrawer(this)" 
-        data-reply="${encodeURIComponent(data.reply)}" 
-        data-sent="${encodeURIComponent(data.prompt)}" 
+        data-reply="${encodeURIComponent(data.reply || '')}" 
+        data-sent="${encodeURIComponent(data.prompt || '')}" 
         data-censored="${isCensored}"
-        data-reason="${encodeURIComponent(reason)}">
+        data-reason="${encodeURIComponent(reason)}"
+        data-filtered-area="${encodeURIComponent(filteredArea)}">
         <strong>Nami:</strong> ${sanitizedReply}${censorshipIndicator}
         <span class="ml-2 opacity-0 group-hover:opacity-100 text-xs text-gray-400 align-middle">📄 Context</span></div>`;
     
-    // This line will now run correctly
     appendLog(document.getElementById('nami-replies'), namiHTML);
 
     const chatHTML = `
@@ -346,33 +346,43 @@ socket.on('bot_reply', (data) => {
         </div>`;
     
     appendLog(document.getElementById('twitch-messages'), chatHTML);
+    
+    // DEBUG: Log what we received
+    console.log('[bot_reply] Received:', {
+        is_censored: isCensored,
+        reason: reason,
+        filtered_area: filteredArea
+    });
 });
 
 window.openDrawer = function(el) {
-    const sent = decodeURIComponent(el.getAttribute('data-sent'));
-    const replyRaw = decodeURIComponent(el.getAttribute('data-reply'));
+    // DEBUG: Log what attributes we're reading
+    console.log('[openDrawer] Element attributes:', {
+        'data-censored': el.getAttribute('data-censored'),
+        'data-reason': el.getAttribute('data-reason'),
+        'data-filtered-area': el.getAttribute('data-filtered-area')
+    });
+    
+    const sent = decodeURIComponent(el.getAttribute('data-sent') || '');
+    const replyRaw = decodeURIComponent(el.getAttribute('data-reply') || '');
     const isCensored = el.getAttribute('data-censored') === 'true';
     const reason = decodeURIComponent(el.getAttribute('data-reason') || 'Unknown');
+    const filteredArea = decodeURIComponent(el.getAttribute('data-filtered-area') || '');
+    
+    console.log('[openDrawer] Parsed values:', { isCensored, reason, filteredArea });
     
     document.getElementById('drawer-sent').textContent = sent;
     const replyEl = document.getElementById('drawer-reply');
     
+    // Clear previous content
+    replyEl.innerHTML = '';
+    replyEl.style.borderColor = '#3a3a3a';
+    replyEl.style.backgroundColor = '#1f1f1f';
+    
     if (isCensored) {
-        replyEl.innerHTML = `
-            <div class="mb-2 p-2 bg-red-900/30 border border-red-500 rounded text-red-200 text-xs">
-                <strong>Safety Trigger:</strong> Banned content detected ("${reason}")
-            </div>
-            <div style="color: #ef4444; font-weight: 600; margin-bottom: 0.5rem;">🚨 ORIGINAL FILTERED RESPONSE:</div>
-        `;
-        const textEl = document.createElement('div');
-        textEl.textContent = replyRaw;
-        replyEl.appendChild(textEl);
+        replyEl.innerHTML = `<div class="mb-1 p-1 bg-red-900/30 border border-red-500 rounded text-sm"><div class="text-red-400 text-xs uppercase font-bold mb-1">⚠️ Safety Filter Triggered</div><div class="flex items-center gap-1 mb-1"><span class="text-gray-400 text-xs">Filtered Word:</span><span class="text-red-200 font-mono bg-red-900/50 px-1.5 py-0.5 rounded text-xs">${reason}</span></div>${filteredArea ? `<div><span class="text-gray-400 text-xs">Filtered Area:</span><span class="text-red-200 font-mono text-xs ml-1">${sanitizeHTML(filteredArea)}</span></div>` : ''}</div><div class="text-gray-500 text-xs uppercase font-bold mb-1">Original Response:</div><div class="text-gray-300 text-sm">${sanitizeHTML(replyRaw)}</div>`;
         replyEl.style.borderColor = '#ef4444';
         replyEl.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
-    } else {
-        replyEl.textContent = replyRaw;
-        replyEl.style.borderColor = '#3a3a3a';
-        replyEl.style.backgroundColor = '#1f1f1f';
     }
     
     document.getElementById('context-drawer').classList.remove('translate-x-full');
