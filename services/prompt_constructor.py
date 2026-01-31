@@ -1,4 +1,4 @@
-# Save as: director_engine/prompt_constructor.py
+# Save as: director_engine/services/prompt_constructor.py
 from typing import List, Dict, Any, Optional
 import re
 import google.generativeai as genai # type: ignore
@@ -19,9 +19,7 @@ class PromptConstructor:
             try:
                 genai.configure(api_key=GEMINI_API_KEY)
                 
-                # --- NEW: DISABLE ALL SAFETY FILTERS ---
-                # We need the raw, unfiltered truth of what is on screen
-                # so Nami can decide how to react to it herself.
+                # --- DISABLE ALL SAFETY FILTERS ---
                 safety_settings = {
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -49,17 +47,25 @@ class PromptConstructor:
         parts = []
 
         # 1. The "Now" (Scene & Vibe)
-        parts.append(self._format_scene_context(store))
+        scene_ctx = self._format_scene_context(store)
+        if scene_ctx:
+            parts.append(scene_ctx)
         
         # 2. The "Orders" (Directive)
-        parts.append(self._format_directive(directive))
+        dir_ctx = self._format_directive(directive)
+        if dir_ctx:
+            parts.append(dir_ctx)
         
         # 3. The "User" (Profile & Relationship)
         if store.active_user_profile:
-            parts.append(self._format_user_context(store.active_user_profile))
+            user_ctx = self._format_user_context(store.active_user_profile)
+            if user_ctx:
+                parts.append(user_ctx)
             
         # 4. The "Past" (Relevant Memories & Narrative)
-        parts.append(self._format_memories(memories, store.narrative_log))
+        mem_ctx = self._format_memories(memories, store.narrative_log)
+        if mem_ctx:
+            parts.append(mem_ctx)
         
         # 5. The "Flow" (Recent Events)
         layers = store.get_all_events_for_summary()
@@ -73,9 +79,16 @@ class PromptConstructor:
         
         # AWAIT the formatting
         recent_events_str = await self._format_recent_events(active_events)
-        parts.append(recent_events_str)
+        if recent_events_str:
+            parts.append(recent_events_str)
 
-        return "\n\n".join(parts)
+        # Ensure we always return something
+        if not parts:
+            return "### CURRENT SITUATION\nJust started up. Waiting for events to occur."
+        
+        result = "\n\n".join(parts)
+        print(f"📋 [PromptConstructor] Built context block: {len(result)} chars")
+        return result
 
     async def _format_recent_events(self, events: List[EventItem]) -> str:
         """
@@ -142,14 +155,19 @@ class PromptConstructor:
                     
                 except Exception as e:
                     print(f"⚠️ [PromptConstructor] Gemini Summarization Failed: {e}")
-                    all_lines.append("### VISUAL CONTEXT (Raw)\n" + "\n".join(visual_events_text[:3]))
+                    # Fallback: use raw but limit to last 3
+                    all_lines.append("### VISUAL CONTEXT (Raw)\n" + "\n".join(visual_events_text[-3:]))
             else:
-                all_lines.append("### VISUAL CONTEXT (Raw)\n" + "\n".join(visual_events_text))
+                # No Gemini, use raw visuals (limited)
+                all_lines.append("### VISUAL CONTEXT (Raw)\n" + "\n".join(visual_events_text[-5:]))
 
         # 2. Append non-visual events
         if other_events_lines:
             all_lines.append("### AUDIO & CHAT LOG")
             all_lines.extend(other_events_lines)
+        
+        if not all_lines:
+            return "### IMMEDIATE STREAM (Last 30s)\n(No significant events detected)"
         
         return "\n\n".join(all_lines)
 
@@ -158,12 +176,15 @@ class PromptConstructor:
         mood_str = f"Current Mood: {store.current_mood} ({store.emotional_momentum})"
         scene_str = f"Scene: {store.current_scene.name}"
         flow_str = f"Conversation Flow: {store.current_flow.name}"
-        return f"### CURRENT SITUATION\n{scene_str}\n{mood_str}\n{flow_str}\nSummary: {store.current_summary}"
+        summary = store.current_summary or "Just starting up."
+        return f"### CURRENT SITUATION\n{scene_str}\n{mood_str}\n{flow_str}\nSummary: {summary}"
 
     def _format_directive(self, directive: Directive) -> str:
-        if not directive: return ""
+        if not directive: 
+            return ""
         constraints = ""
-        if directive.constraints: constraints = "\nConstraints: " + ", ".join(directive.constraints)
+        if directive.constraints: 
+            constraints = "\nConstraints: " + ", ".join(directive.constraints)
         return (
             f"### INSTRUCTION (Top Priority)\n"
             f"Goal: {directive.objective}\n"
@@ -173,16 +194,20 @@ class PromptConstructor:
         )
 
     def _format_user_context(self, profile: Dict[str, Any]) -> str:
+        if not profile:
+            return ""
         facts = [f"- {f['content']}" for f in profile.get('facts', [])[-5:]]
         facts_str = "\n".join(facts) if facts else "No known facts."
         return (
-            f"### ACTIVE USER: {profile['username']}\n"
-            f"Relationship: {profile['relationship']['tier']} (Affinity: {profile['relationship']['affinity']}%)\n"
+            f"### ACTIVE USER: {profile.get('username', 'Unknown')}\n"
+            f"Relationship: {profile.get('relationship', {}).get('tier', 'Unknown')} "
+            f"(Affinity: {profile.get('relationship', {}).get('affinity', 0)}%)\n"
             f"Known Facts:\n{facts_str}"
         )
 
     def _format_memories(self, memories: List[EventItem], narrative_log: List[str]) -> str:
-        if not memories and not narrative_log: return ""
+        if not memories and not narrative_log: 
+            return ""
         text = "### RELEVANT CONTEXT"
         if narrative_log:
             text += "\n[Previously...]\n"

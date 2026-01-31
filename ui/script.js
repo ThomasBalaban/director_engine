@@ -355,12 +355,15 @@ socket.on('bot_reply', (data) => {
     });
 });
 
+// --- FIXED: openDrawer now properly shows reply text for non-censored messages ---
 window.openDrawer = function(el) {
     // DEBUG: Log what attributes we're reading
     console.log('[openDrawer] Element attributes:', {
         'data-censored': el.getAttribute('data-censored'),
         'data-reason': el.getAttribute('data-reason'),
-        'data-filtered-area': el.getAttribute('data-filtered-area')
+        'data-filtered-area': el.getAttribute('data-filtered-area'),
+        'data-reply': el.getAttribute('data-reply') ? 'present' : 'missing',
+        'data-sent': el.getAttribute('data-sent') ? 'present' : 'missing'
     });
     
     const sent = decodeURIComponent(el.getAttribute('data-sent') || '');
@@ -369,9 +372,9 @@ window.openDrawer = function(el) {
     const reason = decodeURIComponent(el.getAttribute('data-reason') || 'Unknown');
     const filteredArea = decodeURIComponent(el.getAttribute('data-filtered-area') || '');
     
-    console.log('[openDrawer] Parsed values:', { isCensored, reason, filteredArea });
+    console.log('[openDrawer] Parsed values:', { isCensored, reason, filteredArea, replyLength: replyRaw.length });
     
-    document.getElementById('drawer-sent').textContent = sent;
+    document.getElementById('drawer-sent').textContent = sent || '(No prompt data available)';
     const replyEl = document.getElementById('drawer-reply');
     
     // Clear previous content
@@ -380,9 +383,22 @@ window.openDrawer = function(el) {
     replyEl.style.backgroundColor = '#1f1f1f';
     
     if (isCensored) {
-        replyEl.innerHTML = `<div class="mb-1 p-1 bg-red-900/30 border border-red-500 rounded text-sm"><div class="text-red-400 text-xs uppercase font-bold mb-1">⚠️ Safety Filter Triggered</div><div class="flex items-center gap-1 mb-1"><span class="text-gray-400 text-xs">Filtered Word:</span><span class="text-red-200 font-mono bg-red-900/50 px-1.5 py-0.5 rounded text-xs">${reason}</span></div>${filteredArea ? `<div><span class="text-gray-400 text-xs">Filtered Area:</span><span class="text-red-200 font-mono text-xs ml-1">${sanitizeHTML(filteredArea)}</span></div>` : ''}</div><div class="text-gray-500 text-xs uppercase font-bold mb-1">Original Response:</div><div class="text-gray-300 text-sm">${sanitizeHTML(replyRaw)}</div>`;
+        replyEl.innerHTML = `
+            <div class="mb-1 p-1 bg-red-900/30 border border-red-500 rounded text-sm">
+                <div class="text-red-400 text-xs uppercase font-bold mb-1">⚠️ Safety Filter Triggered</div>
+                <div class="flex items-center gap-1 mb-1">
+                    <span class="text-gray-400 text-xs">Filtered Word:</span>
+                    <span class="text-red-200 font-mono bg-red-900/50 px-1.5 py-0.5 rounded text-xs">${sanitizeHTML(reason)}</span>
+                </div>
+                ${filteredArea ? `<div><span class="text-gray-400 text-xs">Filtered Area:</span><span class="text-red-200 font-mono text-xs ml-1">${sanitizeHTML(filteredArea)}</span></div>` : ''}
+            </div>
+            <div class="text-gray-500 text-xs uppercase font-bold mb-1">Original Response:</div>
+            <div class="text-gray-300 text-sm">${sanitizeHTML(replyRaw)}</div>`;
         replyEl.style.borderColor = '#ef4444';
         replyEl.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
+    } else {
+        // FIX: This was missing! Set the reply text for non-censored messages
+        replyEl.textContent = replyRaw || '(No reply data available)';
     }
     
     document.getElementById('context-drawer').classList.remove('translate-x-full');

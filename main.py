@@ -28,8 +28,7 @@ app.mount('/socket.io', socket_app)
 base_path = Path(__file__).parent.resolve()
 ui_path = base_path / "ui"
 audio_path = base_path / "audio_effects"
-app.mount("/static", StaticFiles(directory=ui_path, html=True), name="static")
-app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
+# NOTE: Static mounts moved to AFTER all API routes - see below
 
 # --- TASKS ---
 summary_ticker_task: Optional[asyncio.Task] = None
@@ -63,13 +62,45 @@ async def get_summary_data():
 
 @app.get("/breadcrumbs")
 async def get_breadcrumbs(count: int = 3):
-    summary_data = shared.store.get_summary_data()
-    current_query = summary_data.get('summary', "") or " ".join(summary_data.get('topics', []))
-    smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
-    formatted_context = await shared.prompt_constructor.construct_context_block(
-        shared.store, summary_data.get('directive'), smart_memories[:3]
-    )
-    return {"formatted_context": formatted_context}
+    """
+    Returns formatted context for Nami's prompt.
+    This is the bridge between Director (Brain 1) and Nami (Brain 2).
+    """
+    try:
+        print(f"📡 [/breadcrumbs] Request received (count={count})")
+        
+        summary_data = shared.store.get_summary_data()
+        print(f"   Summary data keys: {list(summary_data.keys())}")
+        
+        current_query = summary_data.get('summary', "") or " ".join(summary_data.get('topics', []))
+        print(f"   Query for memories: '{current_query[:50]}...' " if current_query else "   Query: (empty)")
+        
+        smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
+        print(f"   Retrieved {len(smart_memories)} memories")
+        
+        # Get the directive - handle None case
+        directive = summary_data.get('directive')
+        print(f"   Directive: {type(directive).__name__ if directive else 'None'}")
+        
+        # Build the formatted context
+        formatted_context = await shared.prompt_constructor.construct_context_block(
+            shared.store, directive, smart_memories[:3]
+        )
+        
+        print(f"   Formatted context length: {len(formatted_context)} chars")
+        if len(formatted_context) < 100:
+            print(f"   Full context: {formatted_context}")
+        else:
+            print(f"   Context preview: {formatted_context[:150]}...")
+        
+        return {"formatted_context": formatted_context}
+        
+    except Exception as e:
+        print(f"❌ [/breadcrumbs] Error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return a meaningful error context instead of crashing
+        return {"formatted_context": f"[Director Error: {str(e)}]"}
 
 # --- NEW: Speech state endpoint for HTTP fallback ---
 @app.get("/speech_state")
@@ -85,6 +116,12 @@ async def speech_started():
 async def speech_finished():
     shared.set_nami_speaking(False)
     return {"status": "ok"}
+
+# --- IMPORTANT: Mount static files AFTER all API routes ---
+# This prevents the catch-all "/" from intercepting API requests like /breadcrumbs
+app.mount("/static", StaticFiles(directory=ui_path, html=True), name="static")
+# The root mount MUST be last - it catches everything not matched above
+app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
 # --- SOCKET HANDLERS ---
 @shared.sio.on("event")
@@ -102,7 +139,7 @@ async def receive_bot_reply(sid, payload: dict):
         payload.get('prompt', ''), 
         payload.get('is_censored', False),
         payload.get('censorship_reason'),
-        payload.get('filtered_area')  # ADD THIS
+        payload.get('filtered_area')
     )
 
     shared.speech_dispatcher.register_user_response()
@@ -140,6 +177,7 @@ def run_server():
     
     shared.server_ready = True
     print("✅ Director Engine is READY")
+    print(f"📡 API endpoints available at http://localhost:{config.DIRECTOR_PORT}/breadcrumbs")
     
     server = uvicorn.Server(uvicorn.Config(app, host=config.DIRECTOR_HOST, port=config.DIRECTOR_PORT, log_level="warning", loop="asyncio"))
     
