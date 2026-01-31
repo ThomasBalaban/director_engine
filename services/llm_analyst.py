@@ -56,6 +56,85 @@ async def generate_thought(prompt_text: str) -> Optional[str]:
         print(f"[Analyst] Thought generation error: {e}")
         return None
 
+# --- NEW: AI Context Inference ---
+async def infer_stream_context(store: ContextStore) -> Optional[Dict[str, str]]:
+    """
+    Analyzes recent events to infer what game/activity is happening.
+    Returns {"game": "Game Name", "context": "Brief description"} or None.
+    Max 120 chars for context.
+    """
+    if not ollama_client: 
+        return None
+    
+    layers = store.get_all_events_for_summary()
+    
+    # Gather recent visual and audio context
+    recent_visuals = [e.text for e in layers['immediate'] + layers['recent'] 
+                      if e.source == InputSource.VISUAL_CHANGE][-5:]
+    recent_audio = [e.text for e in layers['immediate'] + layers['recent'] 
+                    if e.source == InputSource.AMBIENT_AUDIO][-3:]
+    recent_speech = [e.text for e in layers['immediate'] + layers['recent'] 
+                     if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]][-3:]
+    
+    if not recent_visuals and not recent_audio:
+        return None
+    
+    context_block = ""
+    if recent_visuals:
+        context_block += f"VISUALS: {' | '.join(recent_visuals[:3])}\n"
+    if recent_audio:
+        context_block += f"AUDIO: {' | '.join(recent_audio[:2])}\n"
+    if recent_speech:
+        context_block += f"SPEECH: {' | '.join(recent_speech[:2])}\n"
+    
+    prompt = f"""Based on this stream data, identify what game or activity is being shown.
+
+{context_block}
+
+Respond ONLY with this JSON (no other text):
+{{
+  "game": "<game name or 'Unknown' or 'Just Chatting'>",
+  "context": "<max 120 char description of what's happening>"
+}}
+
+Rules:
+- Game should be the actual game title if identifiable
+- Context should be SHORT (under 120 chars)
+- Context should describe current activity (e.g. "Exploring haunted asylum, looking for ghost evidence")
+- If unsure, say "Unknown" for game
+"""
+    
+    try:
+        response = await ollama_client.chat(
+            model=OLLAMA_MODEL,
+            messages=[{'role': 'user', 'content': prompt}],
+            options={"temperature": 0.3, "num_predict": 100},
+            format='json'
+        )
+        
+        result_text = response['message']['content'].strip()
+        
+        # Parse JSON
+        start = result_text.find('{')
+        end = result_text.rfind('}') + 1
+        if start == -1 or end == 0:
+            return None
+            
+        data = json.loads(result_text[start:end])
+        
+        game = data.get('game', 'Unknown')
+        context = data.get('context', '')
+        
+        # Enforce 120 char limit
+        if len(context) > 120:
+            context = context[:117] + "..."
+            
+        return {"game": game, "context": context}
+        
+    except Exception as e:
+        print(f"[Analyst] Context inference error: {e}")
+        return None
+
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""
     if username:

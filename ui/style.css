@@ -131,8 +131,7 @@ body { background-color: #1a1a1a; color: #e0e0e0; font-family: 'Inter', sans-ser
 ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #555; }
 
-/* Add this to the end of style.css */
-
+/* Audio Highlight */
 .audio-highlight {
     background-color: rgba(169, 112, 255, 0.15);
     border-left: 3px solid #a970ff;
@@ -140,6 +139,73 @@ body { background-color: #1a1a1a; color: #e0e0e0; font-family: 'Inter', sans-ser
     border-radius: 4px;
     display: block;
     width: 100%;
-    color: #e9d5ff; /* Light purple text */
+    color: #e9d5ff;
     font-weight: 500;
+}
+
+/* === NEW: Lock Button Styles === */
+.lock-btn {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #1a1a1a;
+    border: 1px solid #555;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: all 0.2s ease;
+}
+
+.lock-btn:hover {
+    background: #2a2a2a;
+    border-color: #777;
+}
+
+.lock-btn.locked {
+    background: rgba(239, 68, 68, 0.2);
+    border-color: #ef4444;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+}
+
+.lock-btn.locked:hover {
+    background: rgba(239, 68, 68, 0.3);
+}
+
+/* === AI Update Animation === */
+.ai-updated {
+    animation: ai-pulse 0.5s ease-out;
+    border-color: #a855f7 !important;
+    box-shadow: 0 0 12px rgba(168, 85, 247, 0.4);
+}
+
+@keyframes ai-pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(168, 85, 247, 0.6);
+    }
+    50% {
+        box-shadow: 0 0 20px 4px rgba(168, 85, 247, 0.4);
+    }
+    100% {
+        box-shadow: 0 0 12px rgba(168, 85, 247, 0.4);
+    }
+}
+
+/* AI Suggestion Indicator */
+#ai-suggestion-indicator {
+    background: rgba(168, 85, 247, 0.1);
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+
+/* Live pulse for partial transcripts */
+.live-pulse {
+    animation: live-pulse 1s ease-in-out infinite;
+}
+
+@keyframes live-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
 }

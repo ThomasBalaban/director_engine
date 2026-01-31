@@ -27,23 +27,57 @@ server_ready: bool = False
 manual_context: str = ""
 current_streamer: str = "peepingotter"
 
-def set_manual_context(context: str):
-    global manual_context
+# --- NEW: Lock states for AI auto-fill ---
+streamer_locked: bool = False
+context_locked: bool = False
+
+def set_manual_context(context: str, from_ai: bool = False):
+    global manual_context, context_locked
+    # If locked and this is an AI update, ignore it
+    if context_locked and from_ai:
+        print(f"🔒 [Director] Context locked - AI update ignored")
+        return False
     manual_context = context
-    print(f"📝 [Director] Manual context set: {context[:50]}..." if context else "📝 [Director] Manual context cleared")
+    source = "AI" if from_ai else "Manual"
+    print(f"📝 [Director] Context set ({source}): {context[:50]}..." if context else f"📝 [Director] Context cleared ({source})")
+    return True
 
 def get_manual_context() -> str:
     global manual_context
     return manual_context
 
-def set_current_streamer(streamer_id: str):
-    global current_streamer
+def set_current_streamer(streamer_id: str, from_ai: bool = False):
+    global current_streamer, streamer_locked
+    # If locked and this is an AI update, ignore it
+    if streamer_locked and from_ai:
+        print(f"🔒 [Director] Streamer locked - AI update ignored")
+        return False
     current_streamer = streamer_id
-    print(f"📺 [Director] Now watching: {streamer_id}")
+    source = "AI" if from_ai else "Manual"
+    print(f"📺 [Director] Now watching ({source}): {streamer_id}")
+    return True
 
 def get_current_streamer() -> str:
     global current_streamer
     return current_streamer
+
+def set_streamer_locked(locked: bool):
+    global streamer_locked
+    streamer_locked = locked
+    print(f"{'🔒' if locked else '🔓'} [Director] Streamer lock: {locked}")
+
+def set_context_locked(locked: bool):
+    global context_locked
+    context_locked = locked
+    print(f"{'🔒' if locked else '🔓'} [Director] Context lock: {locked}")
+
+def is_streamer_locked() -> bool:
+    global streamer_locked
+    return streamer_locked
+
+def is_context_locked() -> bool:
+    global context_locked
+    return context_locked
 
 # --- SPEECH STATE TRACKING ---
 # Prevents Director from sending interjections while Nami is speaking
@@ -156,6 +190,16 @@ def emit_event_scored(event: EventItem):
         'id': event.id 
     })
 
+# NEW: Emit AI context suggestions
+def emit_ai_context_suggestion(streamer: str = None, context: str = None):
+    """Emit AI-generated context suggestions to the UI."""
+    _emit_threadsafe('ai_context_suggestion', {
+        'streamer': streamer,
+        'context': context,
+        'streamer_locked': is_streamer_locked(),
+        'context_locked': is_context_locked()
+    })
+
 def emit_director_state(summary, raw_context, prediction, mood, conversation_state, flow_state, user_intent, active_user, memories, directive, adaptive_state=None):
     _emit_threadsafe('director_state', {
         'summary': summary, 
@@ -171,5 +215,8 @@ def emit_director_state(summary, raw_context, prediction, mood, conversation_sta
         'adaptive': adaptive_state or {},
         # Include manual context info
         'manual_context': get_manual_context(),
-        'current_streamer': get_current_streamer()
+        'current_streamer': get_current_streamer(),
+        # NEW: Include lock states
+        'streamer_locked': is_streamer_locked(),
+        'context_locked': is_context_locked()
     })

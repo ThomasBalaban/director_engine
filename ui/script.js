@@ -27,15 +27,29 @@ const batteryVal = document.getElementById('battery-value');
 const flowText = document.getElementById('flow-text');
 const intentText = document.getElementById('intent-text');
 
-// Directive Elements (The missing piece!)
+// Directive Elements
 const dirObjectiveEl = document.getElementById('dir-objective');
 const dirToneEl = document.getElementById('dir-tone');
 const dirActionEl = document.getElementById('dir-action');
 const dirConstraintsBox = document.getElementById('dir-constraints-box');
 const dirConstraintsEl = document.getElementById('dir-constraints');
 
-let lastAudioWasPartial = false;
+// Context Control Elements
+const streamerSelect = document.getElementById('streamer-select');
+const contextInput = document.getElementById('context-input');
+const contextCharCount = document.getElementById('context-char-count');
+const streamerLockBtn = document.getElementById('streamer-lock-btn');
+const contextLockBtn = document.getElementById('context-lock-btn');
+const aiSuggestionIndicator = document.getElementById('ai-suggestion-indicator');
+const aiSuggestionText = document.getElementById('ai-suggestion-text');
+const acceptAiSuggestionBtn = document.getElementById('accept-ai-suggestion');
 
+// Lock States
+let streamerLocked = false;
+let contextLocked = false;
+let pendingAiContext = null;
+
+let lastAudioWasPartial = false;
 
 // Context Logs
 const visionLog = [];
@@ -78,7 +92,153 @@ function initializeChart() {
         }
     });
 }
-window.onload = initializeChart;
+
+// --- Lock Button Functions ---
+window.toggleStreamerLock = function() {
+    streamerLocked = !streamerLocked;
+    updateLockButtonUI(streamerLockBtn, streamerLocked);
+    socket.emit('set_streamer_lock', { locked: streamerLocked });
+    console.log('[Director] Streamer lock:', streamerLocked);
+};
+
+window.toggleContextLock = function() {
+    contextLocked = !contextLocked;
+    updateLockButtonUI(contextLockBtn, contextLocked);
+    socket.emit('set_context_lock', { locked: contextLocked });
+    console.log('[Director] Context lock:', contextLocked);
+};
+
+function updateLockButtonUI(btn, isLocked) {
+    if (!btn) return;
+    btn.textContent = isLocked ? '🔒' : '🔓';
+    btn.classList.toggle('locked', isLocked);
+}
+
+// --- Context Input Character Counter ---
+if (contextInput) {
+    contextInput.addEventListener('input', () => {
+        const len = contextInput.value.length;
+        if (contextCharCount) {
+            contextCharCount.textContent = `${len}/120`;
+            contextCharCount.classList.toggle('text-red-400', len >= 120);
+        }
+    });
+}
+
+// --- AI Context Suggestion Handling ---
+socket.on('ai_context_suggestion', (data) => {
+    console.log('[AI Context] Received suggestion:', data);
+    
+    if (data.context && !contextLocked) {
+        // Auto-apply if not locked
+        if (contextInput) {
+            contextInput.value = data.context;
+            if (contextCharCount) {
+                contextCharCount.textContent = `${data.context.length}/120`;
+            }
+            
+            // Visual feedback that AI updated it
+            contextInput.classList.add('ai-updated');
+            setTimeout(() => contextInput.classList.remove('ai-updated'), 2000);
+        }
+    } else if (data.context && contextLocked) {
+        // Show suggestion but don't apply (context is locked)
+        pendingAiContext = data.context;
+        if (aiSuggestionText) aiSuggestionText.textContent = data.context;
+        if (aiSuggestionIndicator) {
+            aiSuggestionIndicator.classList.remove('hidden');
+            aiSuggestionIndicator.classList.add('flex');
+        }
+    }
+});
+
+// Accept AI Suggestion button
+if (acceptAiSuggestionBtn) {
+    acceptAiSuggestionBtn.addEventListener('click', () => {
+        if (pendingAiContext) {
+            if (contextInput) {
+                contextInput.value = pendingAiContext;
+                if (contextCharCount) {
+                    contextCharCount.textContent = `${pendingAiContext.length}/120`;
+                }
+            }
+            updateManualContext(pendingAiContext);
+            
+            // Hide the suggestion
+            if (aiSuggestionIndicator) {
+                aiSuggestionIndicator.classList.add('hidden');
+                aiSuggestionIndicator.classList.remove('flex');
+            }
+            pendingAiContext = null;
+        }
+    });
+}
+
+// --- Director Controls Logic ---
+async function loadStreamers() {
+    try {
+        const response = await fetch('/static/streamers.json');
+        const data = await response.json();
+        const select = document.getElementById('streamer-select');
+        
+        if (!select) return;
+        
+        select.innerHTML = '';
+        
+        data.streamers.forEach(streamer => {
+            const option = document.createElement('option');
+            option.value = streamer.id;
+            option.textContent = streamer.display_name;
+            select.appendChild(option);
+        });
+        
+        select.value = 'peepingotter';
+        updateStreamerContext(select.value);
+    } catch (error) {
+        console.error('Failed to load streamers:', error);
+    }
+}
+
+function updateStreamerContext(streamerId) {
+    socket.emit('set_streamer', { streamer_id: streamerId });
+    console.log('[Director] Set streamer to:', streamerId);
+}
+
+function updateManualContext(contextText) {
+    socket.emit('set_manual_context', { context: contextText });
+    console.log('[Director] Set manual context:', contextText);
+}
+
+// Event listeners for controls
+const streamerSelectEl = document.getElementById('streamer-select');
+if (streamerSelectEl) {
+    streamerSelectEl.addEventListener('change', (e) => {
+        updateStreamerContext(e.target.value);
+    });
+}
+
+const contextSubmitEl = document.getElementById('context-submit');
+if (contextSubmitEl) {
+    contextSubmitEl.addEventListener('click', () => {
+        const input = document.getElementById('context-input');
+        if (input) updateManualContext(input.value);
+    });
+}
+
+const contextInputEl = document.getElementById('context-input');
+if (contextInputEl) {
+    contextInputEl.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            updateManualContext(contextInputEl.value);
+        }
+    });
+}
+
+// Initialize
+window.onload = () => {
+    initializeChart();
+    loadStreamers();
+};
 
 // --- State Handlers ---
 socket.on('director_state', (data) => {
@@ -107,7 +267,7 @@ socket.on('director_state', (data) => {
     if(summaryContextEl) summaryContextEl.textContent = data.raw_context || '';
     if(predictionEl) predictionEl.textContent = data.prediction || 'Observing flow...';
 
-    // 5. --- NEW: Update Directive Panel ---
+    // 5. Update Directive Panel
     if (data.directive) {
         const d = data.directive;
         if(dirObjectiveEl) dirObjectiveEl.textContent = d.objective || "Waiting...";
@@ -126,7 +286,6 @@ socket.on('director_state', (data) => {
     if (data.adaptive) {
         const a = data.adaptive;
         
-        // State Label
         if (adaptiveStateLabel) {
             adaptiveStateLabel.textContent = a.state || "Normal";
             if (a.state.includes("Chaos")) adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-red-900 text-red-200";
@@ -134,14 +293,12 @@ socket.on('director_state', (data) => {
             else adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-gray-700 text-gray-300";
         }
 
-        // Threshold
         if (thresholdBar) {
             const tVal = a.threshold || 0.9;
             thresholdBar.style.width = `${tVal * 100}%`;
             if(thresholdVal) thresholdVal.textContent = tVal.toFixed(2);
         }
 
-        // Chat Velocity
         if (velocityBar) {
             const vVal = a.chat_velocity || 0;
             const vPct = Math.min((vVal / 40) * 100, 100); 
@@ -149,14 +306,12 @@ socket.on('director_state', (data) => {
             if(velocityVal) velocityVal.textContent = `${vVal.toFixed(1)} /m`;
         }
 
-        // Energy
         if (energyBar) {
             const eVal = a.energy || 0;
             energyBar.style.width = `${eVal * 100}%`;
             if(energyVal) energyVal.textContent = eVal.toFixed(2);
         }
 
-        // Social Battery
         if (a.social_battery && batteryBar) {
             const bat = a.social_battery;
             batteryBar.style.width = `${bat.percent}%`;
@@ -168,7 +323,17 @@ socket.on('director_state', (data) => {
         }
     }
     
-    // 7. User
+    // 7. Sync lock states from server
+    if (typeof data.streamer_locked !== 'undefined') {
+        streamerLocked = data.streamer_locked;
+        updateLockButtonUI(streamerLockBtn, streamerLocked);
+    }
+    if (typeof data.context_locked !== 'undefined') {
+        contextLocked = data.context_locked;
+        updateLockButtonUI(contextLockBtn, contextLocked);
+    }
+    
+    // 8. User
     if (data.active_user && userContentEl) {
         const u = data.active_user;
         userContentEl.innerHTML = `
@@ -191,7 +356,7 @@ socket.on('director_state', (data) => {
         userContentEl.innerHTML = `<p class="text-gray-500 italic text-sm text-center mt-4">No active user context.</p>`;
     }
     
-    // 8. Memories
+    // 9. Memories
     if (memoryListEl) {
         if (data.memories && data.memories.length > 0) {
             memoryListEl.innerHTML = data.memories.map(mem => `
@@ -215,7 +380,6 @@ function updateAmbientLog(elementId, logArray, newText, itemClass = '', isUpdate
     if(!el) return;
     
     if (isUpdate && logArray.length > 0) {
-        // Replace the last item instead of pushing
         logArray[logArray.length - 1] = newText;
     } else {
         logArray.push(newText);
@@ -264,28 +428,23 @@ socket.on('audio_context', d => {
     const logContainer = document.getElementById('audio-context');
     if (!logContainer) return;
 
-    // Check if we are updating a specific session item
     let existingItem = document.getElementById(`session-${d.session_id}`);
     
     if (d.is_partial && existingItem) {
-        // Update the singular long item
         existingItem.textContent = d.context;
-        existingItem.classList.add('live-pulse'); // Visual feedback it's still "typing"
+        existingItem.classList.add('live-pulse');
     } else {
-        // Create a new item (either a new session or a final transcript)
         const div = document.createElement('div');
         if (d.session_id) div.id = `session-${d.session_id}`;
         div.className = 'audio-highlight';
         div.textContent = d.context;
         
         logContainer.appendChild(div);
-        
-        // Auto-scroll
         logContainer.parentElement.scrollTop = logContainer.parentElement.scrollHeight;
     }
 });
+
 socket.on('event_scored', (data) => {
-    // 1. Update Graph
     if (interestChart) {
         scoreLabels.push(""); 
         scoreData.push(data.score.toFixed(2));
@@ -296,7 +455,6 @@ socket.on('event_scored', (data) => {
         interestChart.update('none');
     }
     
-    // 2. Update Score Log
     const logLine = `${data.score.toFixed(2)} - ${data.source}: ${data.text.substring(0,30)}...`;
     graphLog.push(logLine);
     if(graphLog.length > 10) graphLog.shift();
@@ -327,7 +485,6 @@ socket.on('bot_reply', (data) => {
     const censorshipIndicator = isCensored ? 
         `<span class="censored-indicator">🚨 FILTERED (${reason})</span>` : '';
 
-    // IMPORTANT: Make sure ALL data attributes are set here
     const namiHTML = `<div class="log-line nami-reply cursor-pointer ${censorshipClass}" onclick="openDrawer(this)" 
         data-reply="${encodeURIComponent(data.reply || '')}" 
         data-sent="${encodeURIComponent(data.prompt || '')}" 
@@ -347,7 +504,6 @@ socket.on('bot_reply', (data) => {
     
     appendLog(document.getElementById('twitch-messages'), chatHTML);
     
-    // DEBUG: Log what we received
     console.log('[bot_reply] Received:', {
         is_censored: isCensored,
         reason: reason,
@@ -355,9 +511,7 @@ socket.on('bot_reply', (data) => {
     });
 });
 
-// --- FIXED: openDrawer now properly shows reply text for non-censored messages ---
 window.openDrawer = function(el) {
-    // DEBUG: Log what attributes we're reading
     console.log('[openDrawer] Element attributes:', {
         'data-censored': el.getAttribute('data-censored'),
         'data-reason': el.getAttribute('data-reason'),
@@ -377,7 +531,6 @@ window.openDrawer = function(el) {
     document.getElementById('drawer-sent').textContent = sent || '(No prompt data available)';
     const replyEl = document.getElementById('drawer-reply');
     
-    // Clear previous content
     replyEl.innerHTML = '';
     replyEl.style.borderColor = '#3a3a3a';
     replyEl.style.backgroundColor = '#1f1f1f';
@@ -397,7 +550,6 @@ window.openDrawer = function(el) {
         replyEl.style.borderColor = '#ef4444';
         replyEl.style.backgroundColor = 'rgba(239, 68, 68, 0.1)';
     } else {
-        // FIX: This was missing! Set the reply text for non-censored messages
         replyEl.textContent = replyRaw || '(No reply data available)';
     }
     

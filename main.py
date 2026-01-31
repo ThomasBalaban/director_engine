@@ -117,6 +117,14 @@ async def speech_finished():
     shared.set_nami_speaking(False)
     return {"status": "ok"}
 
+# --- NEW: Lock state endpoints ---
+@app.get("/lock_states")
+async def get_lock_states():
+    return {
+        "streamer_locked": shared.is_streamer_locked(),
+        "context_locked": shared.is_context_locked()
+    }
+
 # --- IMPORTANT: Mount static files AFTER all API routes ---
 # This prevents the catch-all "/" from intercepting API requests like /breadcrumbs
 app.mount("/static", StaticFiles(directory=ui_path, html=True), name="static")
@@ -159,13 +167,26 @@ async def handle_speech_finished(sid, payload: dict = None):
 async def handle_set_streamer(sid, payload: dict):
     """Called when operator changes the streamer dropdown"""
     streamer_id = payload.get('streamer_id', 'peepingotter')
-    shared.set_current_streamer(streamer_id)
+    shared.set_current_streamer(streamer_id, from_ai=False)
 
 @shared.sio.on("set_manual_context")
 async def handle_set_manual_context(sid, payload: dict):
     """Called when operator sets manual context (e.g., 'playing Phasmophobia')"""
     context = payload.get('context', '')
-    shared.set_manual_context(context)
+    shared.set_manual_context(context, from_ai=False)
+
+# --- NEW: Lock state handlers ---
+@shared.sio.on("set_streamer_lock")
+async def handle_set_streamer_lock(sid, payload: dict):
+    """Called when operator toggles the streamer lock"""
+    locked = payload.get('locked', False)
+    shared.set_streamer_locked(locked)
+
+@shared.sio.on("set_context_lock")
+async def handle_set_context_lock(sid, payload: dict):
+    """Called when operator toggles the context lock"""
+    locked = payload.get('locked', False)
+    shared.set_context_locked(locked)
 
 # --- SERVER LIFECYCLE ---
 def open_browser():
