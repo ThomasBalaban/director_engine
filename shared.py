@@ -22,6 +22,29 @@ sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 server_ready: bool = False
 
+# --- DIRECTOR MANUAL CONTEXT ---
+# Allows the operator to set context like "currently playing Phasmophobia"
+manual_context: str = ""
+current_streamer: str = "peepingotter"
+
+def set_manual_context(context: str):
+    global manual_context
+    manual_context = context
+    print(f"📝 [Director] Manual context set: {context[:50]}..." if context else "📝 [Director] Manual context cleared")
+
+def get_manual_context() -> str:
+    global manual_context
+    return manual_context
+
+def set_current_streamer(streamer_id: str):
+    global current_streamer
+    current_streamer = streamer_id
+    print(f"📺 [Director] Now watching: {streamer_id}")
+
+def get_current_streamer() -> str:
+    global current_streamer
+    return current_streamer
+
 # --- SPEECH STATE TRACKING ---
 # Prevents Director from sending interjections while Nami is speaking
 nami_is_speaking: bool = False
@@ -145,5 +168,8 @@ def emit_director_state(summary, raw_context, prediction, mood, conversation_sta
         'active_user': active_user,
         'memories': memories,
         'directive': directive, 
-        'adaptive': adaptive_state or {}
+        'adaptive': adaptive_state or {},
+        # Include manual context info
+        'manual_context': get_manual_context(),
+        'current_streamer': get_current_streamer()
     })

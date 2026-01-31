@@ -155,6 +155,18 @@ async def handle_speech_finished(sid, payload: dict = None):
     """Called when Nami finishes speaking (TTS complete)"""
     shared.set_nami_speaking(False)
 
+@shared.sio.on("set_streamer")
+async def handle_set_streamer(sid, payload: dict):
+    """Called when operator changes the streamer dropdown"""
+    streamer_id = payload.get('streamer_id', 'peepingotter')
+    shared.set_current_streamer(streamer_id)
+
+@shared.sio.on("set_manual_context")
+async def handle_set_manual_context(sid, payload: dict):
+    """Called when operator sets manual context (e.g., 'playing Phasmophobia')"""
+    context = payload.get('context', '')
+    shared.set_manual_context(context)
+
 # --- SERVER LIFECYCLE ---
 def open_browser():
     try: webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")

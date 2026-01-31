@@ -15,16 +15,46 @@
 
 <body class="h-screen overflow-hidden flex flex-col p-4 md:p-6 lg:p-8">
     <div class="max-w-screen-2xl mx-auto w-full flex flex-col flex-1 min-h-0">
-        <header class="mb-6 flex-shrink-0 flex justify-between items-center">
-            <div>
+        <header class="mb-4 flex-shrink-0">
+            <div class="flex justify-between items-center mb-3">
                 <h1 class="text-3xl font-bold text-white">Director Engine <span class="text-sm font-medium text-gray-400">| Context Monitor</span></h1>
-            </div>
-            <div class="flex gap-3">
-                <div id="state-pill" class="px-4 py-2 border-2 border-gray-600 bg-gray-800 rounded-full font-bold text-lg flex items-center gap-2">
-                    <span>🗣️</span> <span id="state-text">IDLE</span>
+                <div class="flex gap-3">
+                    <div id="state-pill" class="px-4 py-2 border-2 border-gray-600 bg-gray-800 rounded-full font-bold text-lg flex items-center gap-2">
+                        <span>🗣️</span> <span id="state-text">IDLE</span>
+                    </div>
+                    <div id="mood-pill" class="px-4 py-2 border-2 rounded-full font-bold text-lg mood-Neutral flex items-center gap-2">
+                        <span>🎭</span> <span id="mood-text">Neutral</span>
+                    </div>
                 </div>
-                <div id="mood-pill" class="px-4 py-2 border-2 rounded-full font-bold text-lg mood-Neutral flex items-center gap-2">
-                    <span>🎭</span> <span id="mood-text">Neutral</span>
+            </div>
+            
+            <!-- NEW: Director Controls Bar -->
+            <div class="flex gap-4 items-center bg-[#2a2a2a] border border-[#444] rounded-lg p-3">
+                <!-- Streamer Dropdown -->
+                <div class="flex items-center gap-2">
+                    <label for="streamer-select" class="text-sm text-gray-400 whitespace-nowrap">📺 Watching:</label>
+                    <select id="streamer-select" class="bg-[#1a1a1a] border border-[#555] rounded px-3 py-1.5 text-white text-sm focus:outline-none focus:border-purple-500">
+                        <option value="peepingotter">PeepingOtter</option>
+                    </select>
+                </div>
+                
+                <!-- Context Input -->
+                <div class="flex items-center gap-2 flex-1">
+                    <label for="context-input" class="text-sm text-gray-400 whitespace-nowrap">📝 Context:</label>
+                    <input 
+                        type="text" 
+                        id="context-input" 
+                        placeholder="e.g., Otter is currently playing Phasmophobia..."
+                        class="flex-1 bg-[#1a1a1a] border border-[#555] rounded px-3 py-1.5 text-white text-sm placeholder-gray-500 focus:outline-none focus:border-purple-500"
+                    >
+                    <button id="context-submit" class="bg-purple-600 hover:bg-purple-700 px-4 py-1.5 rounded text-sm font-medium transition-colors">
+                        Set
+                    </button>
+                </div>
+                
+                <!-- Current Context Display -->
+                <div id="current-context-display" class="text-xs text-gray-500 max-w-xs truncate hidden">
+                    <span class="text-gray-400">Active:</span> <span id="active-context-text"></span>
                 </div>
             </div>
         </header>
@@ -211,6 +241,80 @@
         </div>
     </aside>
 
-    <script src="script.js?v=2"></script>
+    <script src="script.js?v=3"></script>
+    <script>
+        // --- Director Controls Logic ---
+        
+        // Load streamers from JSON
+        async function loadStreamers() {
+            try {
+                const response = await fetch('/static/streamers.json');
+                const data = await response.json();
+                const select = document.getElementById('streamer-select');
+                
+                // Clear existing options
+                select.innerHTML = '';
+                
+                // Add options from JSON
+                data.streamers.forEach(streamer => {
+                    const option = document.createElement('option');
+                    option.value = streamer.id;
+                    option.textContent = streamer.display_name;
+                    select.appendChild(option);
+                });
+                
+                // Set default to peepingotter
+                select.value = 'peepingotter';
+                
+                // Send initial selection to server
+                updateStreamerContext(select.value);
+            } catch (error) {
+                console.error('Failed to load streamers:', error);
+            }
+        }
+        
+        // Update streamer context on server
+        function updateStreamerContext(streamerId) {
+            socket.emit('set_streamer', { streamer_id: streamerId });
+            console.log('[Director] Set streamer to:', streamerId);
+        }
+        
+        // Update manual context on server
+        function updateManualContext(contextText) {
+            socket.emit('set_manual_context', { context: contextText });
+            
+            // Show active context indicator
+            const display = document.getElementById('current-context-display');
+            const textEl = document.getElementById('active-context-text');
+            
+            if (contextText.trim()) {
+                textEl.textContent = contextText;
+                display.classList.remove('hidden');
+            } else {
+                display.classList.add('hidden');
+            }
+            
+            console.log('[Director] Set manual context:', contextText);
+        }
+        
+        // Event listeners
+        document.getElementById('streamer-select').addEventListener('change', (e) => {
+            updateStreamerContext(e.target.value);
+        });
+        
+        document.getElementById('context-submit').addEventListener('click', () => {
+            const input = document.getElementById('context-input');
+            updateManualContext(input.value);
+        });
+        
+        document.getElementById('context-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                updateManualContext(e.target.value);
+            }
+        });
+        
+        // Load streamers on page load
+        loadStreamers();
+    </script>
 </body>
 </html>

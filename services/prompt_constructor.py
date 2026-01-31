@@ -44,7 +44,21 @@ class PromptConstructor:
         """
         Builds the dynamic context block. ASYNC to allow for Gemini calls.
         """
+        import shared  # Import here to avoid circular imports
+        
         parts = []
+        
+        # 0. Manual Context from Director (if set)
+        manual_ctx = shared.get_manual_context()
+        current_streamer = shared.get_current_streamer()
+        
+        if manual_ctx or current_streamer:
+            operator_info = "### OPERATOR NOTES"
+            if current_streamer:
+                operator_info += f"\nCurrently watching: {current_streamer}"
+            if manual_ctx:
+                operator_info += f"\nContext: {manual_ctx}"
+            parts.append(operator_info)
 
         # 1. The "Now" (Scene & Vibe)
         scene_ctx = self._format_scene_context(store)
