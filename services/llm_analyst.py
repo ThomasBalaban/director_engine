@@ -2,6 +2,7 @@
 import ollama
 import json
 import httpx
+import asyncio
 from config import (
     OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL, 
     INTERJECTION_THRESHOLD, InputSource, MEMORY_THRESHOLD,
@@ -15,6 +16,10 @@ from typing import List, Tuple, Callable, Any, Optional, Dict
 # Global Async Clients
 http_client: httpx.AsyncClient | None = None
 ollama_client: ollama.AsyncClient | None = None
+
+# --- Context Inference State (non-blocking) ---
+_context_inference_running = False
+_last_inferred_result: Optional[Dict[str, str]] = None
 
 async def create_http_client():
     global http_client, ollama_client
@@ -33,7 +38,7 @@ async def close_http_client():
         await http_client.aclose()
         http_client = None
 
-# --- NEW: Thought Generation for Internal Monologue ---
+# --- Thought Generation for Internal Monologue ---
 async def generate_thought(prompt_text: str) -> Optional[str]:
     """Generates a short, quirky thought based on the behavior engine's prompt."""
     if not ollama_client: return None
@@ -56,38 +61,40 @@ async def generate_thought(prompt_text: str) -> Optional[str]:
         print(f"[Analyst] Thought generation error: {e}")
         return None
 
-# --- NEW: AI Context Inference ---
-async def infer_stream_context(store: ContextStore) -> Optional[Dict[str, str]]:
+# --- NON-BLOCKING Context Inference using Ollama ---
+async def _do_context_inference(store: ContextStore) -> Optional[Dict[str, str]]:
     """
-    Analyzes recent events to infer what game/activity is happening.
-    Returns {"game": "Game Name", "context": "Brief description"} or None.
-    Max 120 chars for context.
+    Internal function that actually performs the inference.
+    Called as a background task - never blocks the main loop.
     """
+    global _context_inference_running, _last_inferred_result
+    
     if not ollama_client: 
         return None
     
-    layers = store.get_all_events_for_summary()
-    
-    # Gather recent visual and audio context
-    recent_visuals = [e.text for e in layers['immediate'] + layers['recent'] 
-                      if e.source == InputSource.VISUAL_CHANGE][-5:]
-    recent_audio = [e.text for e in layers['immediate'] + layers['recent'] 
-                    if e.source == InputSource.AMBIENT_AUDIO][-3:]
-    recent_speech = [e.text for e in layers['immediate'] + layers['recent'] 
-                     if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]][-3:]
-    
-    if not recent_visuals and not recent_audio:
-        return None
-    
-    context_block = ""
-    if recent_visuals:
-        context_block += f"VISUALS: {' | '.join(recent_visuals[:3])}\n"
-    if recent_audio:
-        context_block += f"AUDIO: {' | '.join(recent_audio[:2])}\n"
-    if recent_speech:
-        context_block += f"SPEECH: {' | '.join(recent_speech[:2])}\n"
-    
-    prompt = f"""Based on this stream data, identify what game or activity is being shown.
+    try:
+        layers = store.get_all_events_for_summary()
+        
+        # Gather recent visual and audio context
+        recent_visuals = [e.text for e in layers['immediate'] + layers['recent'] 
+                          if e.source == InputSource.VISUAL_CHANGE][-5:]
+        recent_audio = [e.text for e in layers['immediate'] + layers['recent'] 
+                        if e.source == InputSource.AMBIENT_AUDIO][-3:]
+        recent_speech = [e.text for e in layers['immediate'] + layers['recent'] 
+                         if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]][-3:]
+        
+        if not recent_visuals and not recent_audio:
+            return None
+        
+        context_block = ""
+        if recent_visuals:
+            context_block += f"VISUALS: {' | '.join(recent_visuals[:3])}\n"
+        if recent_audio:
+            context_block += f"AUDIO: {' | '.join(recent_audio[:2])}\n"
+        if recent_speech:
+            context_block += f"SPEECH: {' | '.join(recent_speech[:2])}\n"
+        
+        prompt = f"""Based on this stream data, identify what game or activity is being shown.
 
 {context_block}
 
@@ -103,13 +110,15 @@ Rules:
 - Context should describe current activity (e.g. "Exploring haunted asylum, looking for ghost evidence")
 - If unsure, say "Unknown" for game
 """
-    
-    try:
-        response = await ollama_client.chat(
-            model=OLLAMA_MODEL,
-            messages=[{'role': 'user', 'content': prompt}],
-            options={"temperature": 0.3, "num_predict": 100},
-            format='json'
+        
+        # Use asyncio.wait_for to add a timeout so it never hangs
+        response = await asyncio.wait_for(
+            ollama_client.chat(
+                model=OLLAMA_MODEL,
+                messages=[{'role': 'user', 'content': prompt}],
+                options={"temperature": 0.3, "num_predict": 100}
+            ),
+            timeout=10.0  # 10 second timeout
         )
         
         result_text = response['message']['content'].strip()
@@ -128,12 +137,53 @@ Rules:
         # Enforce 120 char limit
         if len(context) > 120:
             context = context[:117] + "..."
-            
-        return {"game": game, "context": context}
         
+        result = {"game": game, "context": context}
+        _last_inferred_result = result
+        return result
+        
+    except asyncio.TimeoutError:
+        print(f"[Analyst] ⏱️ Context inference timed out (non-blocking, continuing)")
+        return None
     except Exception as e:
         print(f"[Analyst] Context inference error: {e}")
         return None
+    finally:
+        _context_inference_running = False
+
+
+def start_context_inference_task(store: ContextStore, callback: Callable[[Dict[str, str]], None] = None):
+    """
+    Starts a background task for context inference.
+    Non-blocking - returns immediately. 
+    Calls the callback with results when done (if provided).
+    """
+    global _context_inference_running
+    
+    # Don't start if already running
+    if _context_inference_running:
+        return
+    
+    _context_inference_running = True
+    
+    async def _task():
+        result = await _do_context_inference(store)
+        if result and callback:
+            callback(result)
+    
+    # Fire and forget - create task but don't await it
+    asyncio.create_task(_task())
+
+
+def get_last_inferred_context() -> Optional[Dict[str, str]]:
+    """Returns the last successfully inferred context (non-blocking read)."""
+    return _last_inferred_result
+
+
+def is_context_inference_running() -> bool:
+    """Check if inference is currently in progress."""
+    return _context_inference_running
+
 
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""

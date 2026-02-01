@@ -10,9 +10,43 @@ import shared
 
 # --- AI CONTEXT INFERENCE STATE ---
 last_context_inference_time = 0
-CONTEXT_INFERENCE_INTERVAL = 30.0  # Check every 30 seconds
+CONTEXT_INFERENCE_INTERVAL = 45.0  # Check every 45 seconds (non-blocking anyway)
 last_inferred_game = None
 last_inferred_context = None
+
+def _handle_context_inference_result(result: Dict[str, str]):
+    """
+    Callback for when context inference completes.
+    This runs in the main event loop but doesn't block anything.
+    """
+    global last_inferred_game, last_inferred_context
+    
+    if not result:
+        return
+        
+    new_game = result.get('game', 'Unknown')
+    new_context = result.get('context', '')
+    
+    # Check if we have a meaningful update
+    game_changed = new_game != last_inferred_game and new_game != 'Unknown'
+    context_changed = new_context != last_inferred_context and new_context
+    
+    if game_changed or context_changed:
+        print(f"🤖 [AI Context] Inferred: {new_game} | {new_context[:50]}...")
+        
+        # Update if not locked
+        if not shared.is_context_locked() and context_changed:
+            if shared.set_manual_context(new_context, from_ai=True):
+                last_inferred_context = new_context
+        
+        # Emit the suggestion to UI (even if locked, UI can show it)
+        shared.emit_ai_context_suggestion(
+            streamer=None,  # Don't suggest streamer changes for now
+            context=new_context if context_changed else None
+        )
+        
+        if game_changed:
+            last_inferred_game = new_game
 
 # --- EVENT PROCESSOR ---
 async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
@@ -136,7 +170,7 @@ async def reflex_ticker():
 
         
 async def summary_ticker():
-    global last_context_inference_time, last_inferred_game, last_inferred_context
+    global last_context_inference_time
     
     while not shared.server_ready: await asyncio.sleep(0.1)
     print("✅ Summary ticker starting (Low Frequency)")
@@ -168,42 +202,19 @@ async def summary_ticker():
 
             chat_vel, energy_level = shared.store.get_activity_metrics()
             
-            # --- AI CONTEXT INFERENCE ---
+            # --- NON-BLOCKING AI CONTEXT INFERENCE ---
+            # This fires off a background task and continues immediately
             now = time.time()
             if now - last_context_inference_time >= CONTEXT_INFERENCE_INTERVAL:
                 last_context_inference_time = now
                 
-                # Only infer if at least one field is unlocked
-                if not shared.is_streamer_locked() or not shared.is_context_locked():
-                    try:
-                        inferred = await llm_analyst.infer_stream_context(shared.store)
-                        if inferred:
-                            new_game = inferred.get('game', 'Unknown')
-                            new_context = inferred.get('context', '')
-                            
-                            # Check if we have a meaningful update
-                            game_changed = new_game != last_inferred_game and new_game != 'Unknown'
-                            context_changed = new_context != last_inferred_context and new_context
-                            
-                            if game_changed or context_changed:
-                                print(f"🤖 [AI Context] Inferred: {new_game} | {new_context[:50]}...")
-                                
-                                # Update if not locked
-                                if not shared.is_context_locked() and context_changed:
-                                    shared.set_manual_context(new_context, from_ai=True)
-                                    last_inferred_context = new_context
-                                
-                                # Emit the suggestion to UI (even if locked, UI can show it)
-                                shared.emit_ai_context_suggestion(
-                                    streamer=None,  # Don't suggest streamer changes for now
-                                    context=new_context if context_changed else None
-                                )
-                                
-                                if game_changed:
-                                    last_inferred_game = new_game
-                                    
-                    except Exception as e:
-                        print(f"⚠️ [AI Context] Inference error: {e}")
+                # Only start inference if at least one field is unlocked
+                if not shared.is_context_locked():
+                    # Fire and forget - doesn't block the ticker
+                    llm_analyst.start_context_inference_task(
+                        shared.store, 
+                        callback=_handle_context_inference_result
+                    )
             
             shared.emit_director_state(
                 summary=summary_data['summary'], raw_context=summary_data['raw_context'],
