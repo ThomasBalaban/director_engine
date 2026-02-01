@@ -77,7 +77,7 @@ class PromptConstructor:
                 parts.append(user_ctx)
             
         # 4. The "Past" (Relevant Memories & Narrative)
-        mem_ctx = self._format_memories(memories, store.narrative_log)
+        mem_ctx = self._format_memories(memories, store.narrative_log, store.ancient_history_log)
         if mem_ctx:
             parts.append(mem_ctx)
         
@@ -219,18 +219,73 @@ class PromptConstructor:
             f"Known Facts:\n{facts_str}"
         )
 
-    def _format_memories(self, memories: List[EventItem], narrative_log: List[str]) -> str:
-        if not memories and not narrative_log: 
+    def _format_memories(self, memories: List[EventItem], narrative_log: List[str], ancient_log: List[str] = None) -> str:
+        """
+        Format memories and narrative history for the context block.
+        Now includes better labeling and fallback handling.
+        """
+        has_memories = memories and len(memories) > 0
+        has_narrative = narrative_log and len(narrative_log) > 0
+        has_ancient = ancient_log and len(ancient_log) > 0
+        
+        if not has_memories and not has_narrative and not has_ancient:
             return ""
-        text = "### RELEVANT CONTEXT"
-        if narrative_log:
-            text += "\n[Previously...]\n"
-            for entry in narrative_log[-3:]:
-                clean_entry = re.sub(r"^(Here's a summary.*?|In this clip.*?):", "", entry, flags=re.IGNORECASE).strip()
-                text += f"- {clean_entry}\n"
-        if memories:
-            text += "\n[Related Memories]\n"
-            for mem in memories:
+        
+        text = "### CALLBACK MATERIAL"
+        text += "\n(Use these to reference earlier events naturally)"
+        
+        # Ancient history (oldest, most compressed)
+        if has_ancient:
+            text += "\n\n[Way Earlier...]\n"
+            for entry in ancient_log[-2:]:  # Last 2 ancient entries
+                clean_entry = self._clean_narrative_entry(entry)
+                text += f"• {clean_entry}\n"
+        
+        # Recent narrative (specific memorable moments)
+        if has_narrative:
+            text += "\n[Earlier This Stream...]\n"
+            for entry in narrative_log[-3:]:  # Last 3 narrative entries
+                clean_entry = self._clean_narrative_entry(entry)
+                text += f"• {clean_entry}\n"
+        
+        # Semantic memories (event-specific recalls)
+        if has_memories:
+            text += "\n[Related Moments]\n"
+            for mem in memories[:3]:  # Top 3 most relevant
                 content = mem.memory_text or mem.text
-                text += f"- (Recall) {content}\n"
+                # Truncate long memories
+                if len(content) > 150:
+                    content = content[:147] + "..."
+                text += f"• {content}\n"
+        
+        # If we only have narrative but it's generic, add a note
+        if has_narrative and not has_memories:
+            text += "\n[Note: No specific semantic matches - use narrative for callbacks]"
+        
         return text
+    
+    def _clean_narrative_entry(self, entry: str) -> str:
+        """Clean up narrative entries by removing common AI preambles."""
+        clean_entry = entry
+        
+        # Remove common AI preambles
+        preambles = [
+            r"^Here's a summary.*?:",
+            r"^In this clip.*?:",
+            r"^The memorable moment is:?\s*",
+            r"^Memorable moment:?\s*",
+            r"^One memorable moment:?\s*",
+            r"^Previously:?\s*",
+            r"^Earlier:?\s*",
+        ]
+        
+        for pattern in preambles:
+            clean_entry = re.sub(pattern, "", clean_entry, flags=re.IGNORECASE).strip()
+        
+        # Remove surrounding quotes
+        if clean_entry.startswith('"') and clean_entry.endswith('"'):
+            clean_entry = clean_entry[1:-1]
+        if clean_entry.startswith("'") and clean_entry.endswith("'"):
+            clean_entry = clean_entry[1:-1]
+        
+        return clean_entry.strip()

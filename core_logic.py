@@ -6,6 +6,7 @@ import config
 import services.llm_analyst as llm_analyst
 from scoring import calculate_event_score, EventScore
 from context.context_store import EventItem
+from config import InputSource
 import shared 
 
 # --- AI CONTEXT INFERENCE STATE ---
@@ -168,6 +169,54 @@ async def reflex_ticker():
             print(f"⚠️ [Reflex] Error: {e}")
         await asyncio.sleep(1.0)
 
+
+def _build_memory_query(store, summary_data: Dict[str, Any]) -> str:
+    """
+    Build a rich query for semantic memory retrieval.
+    Combines recent speech, visual context, and topics for better matching.
+    """
+    query_parts = []
+    
+    # 1. Recent speech (what the user/streamer actually said)
+    layers = store.get_all_events_for_summary()
+    recent_speech = [
+        e.text for e in layers['immediate'] + layers['recent'] 
+        if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]
+    ][-3:]  # Last 3 speech events
+    
+    if recent_speech:
+        query_parts.extend(recent_speech)
+    
+    # 2. Recent visual keywords (what's on screen)
+    recent_visual = [
+        e.text for e in layers['immediate'] 
+        if e.source == InputSource.VISUAL_CHANGE
+    ][-1:]  # Most recent visual
+    
+    if recent_visual:
+        # Take just the first 100 chars of visual to avoid noise
+        query_parts.append(recent_visual[0][:100])
+    
+    # 3. Current topics from summary
+    topics = summary_data.get('topics', [])
+    if topics:
+        query_parts.extend(topics[:3])
+    
+    # 4. Fallback to summary if nothing else
+    if not query_parts:
+        summary = summary_data.get('summary', '')
+        if summary:
+            query_parts.append(summary)
+    
+    # Combine into a single query string
+    query = " ".join(query_parts)
+    
+    # Limit length to avoid issues
+    if len(query) > 500:
+        query = query[:500]
+    
+    return query
+
         
 async def summary_ticker():
     global last_context_inference_time
@@ -191,26 +240,48 @@ async def summary_ticker():
             await shared.context_compressor.run_compression_cycle(shared.store)
 
             summary_data = shared.store.get_summary_data()
-            current_query = summary_data.get('summary', "") or " ".join(summary_data.get('topics', []))
+            
+            # --- IMPROVED: Build a richer query for memory retrieval ---
+            current_query = _build_memory_query(shared.store, summary_data)
+
+            # --- DEBUG: Log memory retrieval ---
+            print(f"🧠 [Memory] Query: '{current_query[:60]}...' " if len(current_query) > 60 else f"🧠 [Memory] Query: '{current_query}'")
+            print(f"🧠 [Memory] Total memories in store: {len(shared.store.all_memories)}")
 
             smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
-            memories_list = [{"source": m.source.name, "text": m.memory_text or m.text, "score": round(m.score.interestingness, 2), "type": "memory"} for m in smart_memories]
+            
+            print(f"🧠 [Memory] Retrieved {len(smart_memories)} relevant memories")
+            for i, m in enumerate(smart_memories[:3]):
+                content = m.memory_text or m.text
+                print(f"   {i+1}. [{m.source.name}] {content[:50]}... (score: {m.score.interestingness:.2f})")
 
+            memories_list = [
+                {
+                    "source": m.source.name, 
+                    "text": m.memory_text or m.text, 
+                    "score": round(m.score.interestingness, 2), 
+                    "type": "memory"
+                } for m in smart_memories
+            ]
+
+            # Add narrative history entries
             if shared.store.narrative_log:
                 for i, story in enumerate(reversed(shared.store.narrative_log[-3:])):
-                    memories_list.insert(i, {"source": "NARRATIVE_HISTORY", "text": f"Previously: {story}", "score": 1.0, "type": "narrative"})
+                    memories_list.insert(i, {
+                        "source": "NARRATIVE_HISTORY", 
+                        "text": f"Earlier: {story}", 
+                        "score": 1.0, 
+                        "type": "narrative"
+                    })
 
             chat_vel, energy_level = shared.store.get_activity_metrics()
             
             # --- NON-BLOCKING AI CONTEXT INFERENCE ---
-            # This fires off a background task and continues immediately
             now = time.time()
             if now - last_context_inference_time >= CONTEXT_INFERENCE_INTERVAL:
                 last_context_inference_time = now
                 
-                # Only start inference if at least one field is unlocked
                 if not shared.is_context_locked():
-                    # Fire and forget - doesn't block the ticker
                     llm_analyst.start_context_inference_task(
                         shared.store, 
                         callback=_handle_context_inference_result
@@ -235,4 +306,6 @@ async def summary_ticker():
                 asyncio.create_task(llm_analyst.analyze_and_update_event(stale_event, shared.store, shared.profile_manager, handle_analysis_complete))
         except Exception as e:
             print(f"[Director] Error in summary ticker: {e}")
+            import traceback
+            traceback.print_exc()
         await asyncio.sleep(config.SUMMARY_INTERVAL_SECONDS)

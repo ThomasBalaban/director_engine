@@ -1,11 +1,11 @@
-# Save as: director_engine/llm_analyst.py
+# Save as: director_engine/services/llm_analyst.py
 import ollama
 import json
 import httpx
 import asyncio
 from config import (
     OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL, 
-    INTERJECTION_THRESHOLD, InputSource, MEMORY_THRESHOLD,
+    INTERJECTION_THRESHOLD, InputSource,
     ConversationState, FlowState, UserIntent 
 )
 from context.context_store import ContextStore, EventItem
@@ -20,6 +20,10 @@ ollama_client: ollama.AsyncClient | None = None
 # --- Context Inference State (non-blocking) ---
 _context_inference_running = False
 _last_inferred_result: Optional[Dict[str, str]] = None
+
+# --- LOWERED MEMORY THRESHOLD ---
+# Events with this score or higher get promoted to long-term memory
+MEMORY_PROMOTION_THRESHOLD = 0.70  # Lowered from 0.85
 
 async def create_http_client():
     global http_client, ollama_client
@@ -197,13 +201,17 @@ def build_analysis_prompt(text: str, username: str = None) -> str:
 Analyze this streaming event: "{text}"
 
 1. Rate on a scale of 0.0 to 1.0:
-   - Interestingness (General value)
+   - Interestingness (General value - how noteworthy is this?)
    - Urgency (Need for immediate response)
-   - Conversational Value (Potential to spark dialogue)
-   - Emotional Intensity (Strength of emotion)
+   - Conversational Value (Potential to spark dialogue or be referenced later)
+   - Emotional Intensity (Strength of emotion displayed)
    - Topic Relevance (Connection to ongoing themes)
+
 2. Determine sentiment (one word: positive, negative, neutral, excited, frustrated, scared, horny, tired).
-3. Write a 1-sentence synopsis for long-term memory.
+
+3. Write a 1-sentence synopsis for long-term memory. Make it SPECIFIC and MEMORABLE.
+   Good: "Otter rage-quit after getting hit by a blue shell right before the finish line"
+   Bad: "The user reacted to a game event"
 {user_instruction}
 
 Respond ONLY with this JSON structure:
@@ -216,7 +224,7 @@ Respond ONLY with this JSON structure:
     "topic_relevance": <float>
   }},
   "sentiment": "<string>",
-  "summary": "<string>",
+  "summary": "<string - specific and memorable>",
   "user_facts": ["<fact1>"]
 }}
 """
@@ -287,9 +295,18 @@ async def analyze_and_update_event(
                 event.score = new_score
                 score_updated = True
             
-            if new_score.interestingness >= MEMORY_THRESHOLD:
+            # --- LOWERED THRESHOLD for memory promotion ---
+            # Also consider conversational_value for memory worthiness
+            should_promote = (
+                new_score.interestingness >= MEMORY_PROMOTION_THRESHOLD or
+                new_score.conversational_value >= 0.75 or
+                new_score.emotional_intensity >= 0.8
+            )
+            
+            if should_promote:
                 store.promote_to_memory(event, summary_text=summary_str)
                 promoted = True
+                print(f"💾 [Analyst] Promoted to memory: {summary_str[:50] if summary_str else event.text[:50]}...")
 
             if new_score.urgency >= INTERJECTION_THRESHOLD:
                 await trigger_nami_interjection(event, new_score.urgency)
