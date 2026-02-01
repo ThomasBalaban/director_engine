@@ -12,6 +12,9 @@ class PromptConstructor:
     The Storyteller.
     Takes the raw mathematical state of the engine and turns it into 
     a natural language prompt for the LLM.
+    
+    UPDATED: Now includes dynamic reordering based on user activity and 
+    intelligent log compression (debouncing).
     """
     def __init__(self):
         self.gemini_model = None
@@ -46,76 +49,102 @@ class PromptConstructor:
         """
         import shared  # Import here to avoid circular imports
         
-        parts = []
+        # --- 1. GATHER DATA ---
         
-        # 0. Manual Context from Director (if set)
-        manual_ctx = shared.get_manual_context()
-        current_streamer = shared.get_current_streamer()
-        
-        if manual_ctx or current_streamer:
-            operator_info = "### OPERATOR NOTES"
-            if current_streamer:
-                operator_info += f"\nCurrently watching: {current_streamer}"
-            if manual_ctx:
-                operator_info += f"\nContext: {manual_ctx}"
-            parts.append(operator_info)
-
-        # 1. The "Now" (Scene & Vibe)
-        scene_ctx = self._format_scene_context(store)
-        if scene_ctx:
-            parts.append(scene_ctx)
-        
-        # 2. The "Orders" (Directive)
-        dir_ctx = self._format_directive(directive)
-        if dir_ctx:
-            parts.append(dir_ctx)
-        
-        # 3. The "User" (Profile & Relationship)
-        if store.active_user_profile:
-            user_ctx = self._format_user_context(store.active_user_profile)
-            if user_ctx:
-                parts.append(user_ctx)
-            
-        # 4. The "Past" (Relevant Memories & Narrative)
-        mem_ctx = self._format_memories(memories, store.narrative_log, store.ancient_history_log)
-        if mem_ctx:
-            parts.append(mem_ctx)
-        
-        # 5. The "Flow" (Recent Events)
+        # Get raw event layers
         layers = store.get_all_events_for_summary()
         
-        # Filter for high relevance or recency
+        # Filter for relevant events
         active_events = layers['immediate'] + [
             e for e in layers['recent'] 
             if e.score.interestingness > 0.4 or e.source in [InputSource.TWITCH_MENTION, InputSource.DIRECT_MICROPHONE]
         ]
         active_events.sort(key=lambda x: x.timestamp)
         
-        # AWAIT the formatting
-        recent_events_str = await self._format_recent_events(active_events)
-        if recent_events_str:
-            parts.append(recent_events_str)
+        # Check if the user is actively talking (Used for Reordering)
+        user_is_speaking = any(e.source == InputSource.DIRECT_MICROPHONE for e in active_events)
 
-        # Ensure we always return something
+        # --- 2. PREPARE SECTIONS ---
+        
+        # A. Visuals (Scene description)
+        visual_str = await self._format_visual_summary(active_events)
+        
+        # B. Audio/Chat Log (The dialogue history)
+        log_str = self._format_event_log(active_events)
+        
+        # C. Static Context (Manual notes)
+        manual_ctx = shared.get_manual_context()
+        current_streamer = shared.get_current_streamer()
+        operator_str = ""
+        if manual_ctx or current_streamer:
+            operator_str = "### OPERATOR NOTES"
+            if current_streamer: operator_str += f"\nCurrently watching: {current_streamer}"
+            if manual_ctx: operator_str += f"\nContext: {manual_ctx}"
+
+        # D. User Profile
+        user_ctx = ""
+        if store.active_user_profile:
+            user_ctx = self._format_user_context(store.active_user_profile)
+
+        # E. Engine State
+        scene_ctx = self._format_scene_context(store)
+        dir_ctx = self._format_directive(directive)
+        mem_ctx = self._format_memories(memories, store.narrative_log, store.ancient_history_log)
+
+        # --- 3. DYNAMIC ASSEMBLY (The "Director Brain") ---
+        
+        parts = []
+        
+        # Always start with Operator Notes if they exist
+        if operator_str: parts.append(operator_str)
+
+        if user_is_speaking:
+            # === MODE A: CONVERSATION FOCUSED ===
+            # If user is talking, we prioritize listening to them.
+            # Visuals become background context.
+            
+            parts.append("### FOCUS: USER INTERACTION (Prioritize responding to this)")
+            if user_ctx: parts.append(user_ctx)
+            
+            # Put the Speech Log immediately after the user profile
+            parts.append(log_str)
+            
+            parts.append("### BACKGROUND CONTEXT (Game State)")
+            if scene_ctx: parts.append(scene_ctx)
+            parts.append(visual_str)
+            
+        else:
+            # === MODE B: COMMENTARY FOCUSED ===
+            # If user is silent, we prioritize the stream/game.
+            
+            parts.append("### CURRENT GAME STATE (Comment on this)")
+            if scene_ctx: parts.append(scene_ctx)
+            parts.append(visual_str)
+            
+            # Audio log acts as ambient background here
+            parts.append(log_str)
+            
+            if user_ctx: parts.append(user_ctx)
+
+        # Directive and Memories always go near the end for instruction adherence
+        if mem_ctx: parts.append(mem_ctx)
+        if dir_ctx: parts.append(dir_ctx)
+
+        # Fallback if empty
         if not parts:
             return "### CURRENT SITUATION\nJust started up. Waiting for events to occur."
         
         result = "\n\n".join(parts)
-        print(f"📋 [PromptConstructor] Built context block: {len(result)} chars")
+        print(f"📋 [PromptConstructor] Built context block: {len(result)} chars (User Active: {user_is_speaking})")
         return result
 
-    async def _format_recent_events(self, events: List[EventItem]) -> str:
+    async def _format_visual_summary(self, events: List[EventItem]) -> str:
         """
-        Formats the raw stream. 
-        Uses Gemini to condense visual hallucinations if available.
+        Extracts visual events and summarizes them using Gemini or a smart fallback.
         """
-        if not events:
-            return "### IMMEDIATE STREAM (Last 30s)\n(Silence...)"
-            
         visual_events_text = []
-        other_events_lines = []
         
-        # Regex to strip common AI filler phrases
+        # Regex to strip common AI filler phrases from raw vision output
         ai_filler_regex = re.compile(
             r"^(Okay, let's (describe|analyze|break down) (what's going on in this image|this image|this image:)|"
             r"Here's the screen content analysis:|Alright, here's the rundown of what I'm seeing:|It's a cartoon still, focusing on|"
@@ -124,66 +153,113 @@ class PromptConstructor:
             r"The composition (keeps|focuses on)|Here's the screen content analysis:|Okay, this looks like a shot from an animated series\.)\s*", 
             flags=re.IGNORECASE
         )
-        
+
         for e in events:
             if e.source == InputSource.VISUAL_CHANGE:
                 cleaned_text = ai_filler_regex.sub("", e.text).strip()
                 if cleaned_text:
                      visual_events_text.append(cleaned_text)
+        
+        if not visual_events_text:
+            return "### VISUAL CONTEXT\n(No visual changes detected)"
+
+        # 1. TRY GEMINI SUMMARIZATION (ASYNC NOW)
+        if self.gemini_model:
+            try:
+                raw_text_block = "\n".join([f"- {t}" for t in visual_events_text])
+                gemini_prompt = (
+                    "You are a visual cortex. I will give you a sequence of raw, repetitive image descriptions from a video stream.\n"
+                    "Your job is to CONDENSE them into 1-2 sentences that describe exactly what is happening.\n"
+                    "Rules:\n"
+                    "- Do NOT say 'The image shows'. Just describe the scene.\n"
+                    "- Combine repetitive details. If 5 frames say 'angry girl', just say 'an angry girl'.\n"
+                    "- Keep all specific visual details (colors, character features, actions), even if they are graphic or mature.\n"
+                    "- If the scene changes, describe the transition.\n\n"
+                    f"RAW DATA:\n{raw_text_block}"
+                )
                 
-            elif e.source == InputSource.DIRECT_MICROPHONE:
-                other_events_lines.append(f"[🎤 USER SAID] {e.text}")
+                # --- CRITICAL FIX: Use async version to prevent server freeze ---
+                response = await self.gemini_model.generate_content_async(gemini_prompt)
+                summary = response.text.strip()
+                return f"### VISUAL CONTEXT (Condensed)\n{summary}"
+                
+            except Exception as e:
+                print(f"⚠️ [PromptConstructor] Gemini Summarization Failed: {e}")
+        
+        # 2. SMART FALLBACK (Deduplication)
+        unique_visuals = list(dict.fromkeys(visual_events_text))
+        final_lines = unique_visuals[-2:]
+        
+        return "### VISUAL CONTEXT (Raw)\n" + "\n".join(final_lines)
+
+    def _format_event_log(self, events: List[EventItem]) -> str:
+        """
+        Formats audio, chat, and system events with INTELLIGENT DEBOUNCING.
+        Combines consecutive speech from the same source to reduce noise.
+        """
+        lines = []
+        
+        # Debouncing tracking
+        last_source = None
+        last_username = None
+        last_text = None
+        
+        for e in events:
+            # Skip visuals (handled separately)
+            if e.source == InputSource.VISUAL_CHANGE:
+                continue
+                
+            # Get speaker name for chat/twitch
+            username = e.metadata.get('username', 'Chat')
+            
+            # --- DEBOUNCING LOGIC ---
+            
+            # 1. Spam Filter: Ignore exact duplicate text from same source immediately
+            if e.text == last_text and e.source == last_source:
+                continue
+
+            # 2. Microphone Aggregation: If user speaks twice in a row, combine lines
+            if (e.source == InputSource.DIRECT_MICROPHONE and 
+                last_source == InputSource.DIRECT_MICROPHONE):
+                # Append to the previous line in the list
+                lines[-1] += f" {e.text}"
+                last_text = e.text # Update last text check
+                continue
+                
+            # 3. Ambient Audio Aggregation: Same for ambient voice
+            if (e.source == InputSource.AMBIENT_AUDIO and 
+                last_source == InputSource.AMBIENT_AUDIO):
+                # Only combine if it seems like a sentence continuation (heuristic)
+                lines[-1] += f" {e.text}"
+                last_text = e.text
+                continue
+            
+            # --- FORMATTING ---
+            
+            line_str = ""
+            if e.source == InputSource.DIRECT_MICROPHONE:
+                line_str = f"[🎤 USER SAID] {e.text}"
             elif e.source == InputSource.AMBIENT_AUDIO:
-                other_events_lines.append(f"[AMBIENT_AUDIO] {e.text}")
-            elif e.source == InputSource.TWITCH_MENTION:
-                other_events_lines.append(f"[💬 {e.metadata.get('username', 'Chat')}] {e.text}")
-            elif e.source == InputSource.TWITCH_CHAT:
-                other_events_lines.append(f"[💬 {e.metadata.get('username', 'Chat')}] {e.text}")
+                line_str = f"[AMBIENT_AUDIO] {e.text}"
+            elif e.source in [InputSource.TWITCH_MENTION, InputSource.TWITCH_CHAT]:
+                line_str = f"[💬 {username}] {e.text}"
             elif e.source == InputSource.INTERNAL_THOUGHT:
-                other_events_lines.append(f"[💭 THOUGHT] {e.text}")
+                line_str = f"[💭 THOUGHT] {e.text}"
             elif e.source == InputSource.SYSTEM_PATTERN:
-                other_events_lines.append(f"[⚙️ SYSTEM] {e.text}")
-
-        all_lines = []
-        
-        # 1. INTELLIGENT VISUAL SUMMARY
-        if visual_events_text:
-            if self.gemini_model:
-                try:
-                    raw_text_block = "\n".join([f"- {t}" for t in visual_events_text])
-                    gemini_prompt = (
-                        "You are a visual cortex. I will give you a sequence of raw, repetitive image descriptions from a video stream.\n"
-                        "Your job is to CONDENSE them into 1-2 sentences that describe exactly what is happening.\n"
-                        "Rules:\n"
-                        "- Do NOT say 'The image shows'. Just describe the scene.\n"
-                        "- Combine repetitive details. If 5 frames say 'angry girl', just say 'an angry girl'.\n"
-                        "- Keep all specific visual details (colors, character features, actions), even if they are graphic or mature.\n"
-                        "- If the scene changes, describe the transition.\n\n"
-                        f"RAW DATA:\n{raw_text_block}"
-                    )
-                    
-                    response = self.gemini_model.generate_content(gemini_prompt)
-                    summary = response.text.strip()
-                    
-                    all_lines.append(f"### VISUAL CONTEXT (Condensed)\n{summary}")
-                    
-                except Exception as e:
-                    print(f"⚠️ [PromptConstructor] Gemini Summarization Failed: {e}")
-                    # Fallback: use raw but limit to last 3
-                    all_lines.append("### VISUAL CONTEXT (Raw)\n" + "\n".join(visual_events_text[-3:]))
-            else:
-                # No Gemini, use raw visuals (limited)
-                all_lines.append("### VISUAL CONTEXT (Raw)\n" + "\n".join(visual_events_text[-5:]))
-
-        # 2. Append non-visual events
-        if other_events_lines:
-            all_lines.append("### AUDIO & CHAT LOG")
-            all_lines.extend(other_events_lines)
-        
-        if not all_lines:
-            return "### IMMEDIATE STREAM (Last 30s)\n(No significant events detected)"
-        
-        return "\n\n".join(all_lines)
+                line_str = f"[⚙️ SYSTEM] {e.text}"
+            
+            if line_str:
+                lines.append(line_str)
+                
+            # Update trackers
+            last_source = e.source
+            last_username = username
+            last_text = e.text
+            
+        if not lines:
+            return "### AUDIO & CHAT LOG\n(Silence...)"
+            
+        return "### AUDIO & CHAT LOG\n" + "\n".join(lines)
 
     # --- Helper methods ---
     def _format_scene_context(self, store: ContextStore) -> str:
@@ -191,7 +267,7 @@ class PromptConstructor:
         scene_str = f"Scene: {store.current_scene.name}"
         flow_str = f"Conversation Flow: {store.current_flow.name}"
         summary = store.current_summary or "Just starting up."
-        return f"### CURRENT SITUATION\n{scene_str}\n{mood_str}\n{flow_str}\nSummary: {summary}"
+        return f"{scene_str}\n{mood_str}\n{flow_str}\nSummary: {summary}"
 
     def _format_directive(self, directive: Directive) -> str:
         if not directive: 
@@ -222,7 +298,6 @@ class PromptConstructor:
     def _format_memories(self, memories: List[EventItem], narrative_log: List[str], ancient_log: List[str] = None) -> str:
         """
         Format memories and narrative history for the context block.
-        Now includes better labeling and fallback handling.
         """
         has_memories = memories and len(memories) > 0
         has_narrative = narrative_log and len(narrative_log) > 0
@@ -253,14 +328,9 @@ class PromptConstructor:
             text += "\n[Related Moments]\n"
             for mem in memories[:3]:  # Top 3 most relevant
                 content = mem.memory_text or mem.text
-                # Truncate long memories
                 if len(content) > 150:
                     content = content[:147] + "..."
                 text += f"• {content}\n"
-        
-        # If we only have narrative but it's generic, add a note
-        if has_narrative and not has_memories:
-            text += "\n[Note: No specific semantic matches - use narrative for callbacks]"
         
         return text
     
@@ -268,7 +338,6 @@ class PromptConstructor:
         """Clean up narrative entries by removing common AI preambles."""
         clean_entry = entry
         
-        # Remove common AI preambles
         preambles = [
             r"^Here's a summary.*?:",
             r"^In this clip.*?:",

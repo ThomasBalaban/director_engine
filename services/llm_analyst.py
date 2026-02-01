@@ -192,9 +192,10 @@ def is_context_inference_running() -> bool:
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""
     if username:
-        user_instruction = (
-            f"4. Check if the user '{username}' explicitly states a NEW, CONCRETE fact about themselves. "
-            f"Extract ONLY the fact. REJECT general observations/meta-descriptions."
+       user_instruction = (
+            f"4. Check if '{username}' explicitly reveals a concrete bio detail (e.g., age, job, pet, location, hobby). "
+            f"STRICTLY FORBIDDEN: Facts about the stream itself, 'testing', 'existing', or 'chatting'. "
+            f"If the fact is trivial, return an empty list."
         )
 
     return f"""
