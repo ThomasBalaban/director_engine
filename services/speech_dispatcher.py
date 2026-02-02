@@ -45,6 +45,19 @@ class SpeechDispatcher:
         self.reacted_event_ids: set = set()
         self.max_tracked_events = 50
     
+    async def initialize(self):
+        """Initialize the HTTP client for sending interjections."""
+        if self.http_client is None:
+            self.http_client = httpx.AsyncClient()
+            print("✅ [SpeechDispatcher] HTTP client initialized")
+    
+    async def close(self):
+        """Close the HTTP client."""
+        if self.http_client:
+            await self.http_client.aclose()
+            self.http_client = None
+            print("✅ [SpeechDispatcher] HTTP client closed")
+    
     def register_user_response(self):
         """Call this when Nami responds to a direct user interaction."""
         self.last_user_response_time = time.time()
