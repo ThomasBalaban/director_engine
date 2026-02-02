@@ -1,3 +1,4 @@
+# Save as: director_engine/services/sensor_bridge.py
 import asyncio
 import websockets
 import json
@@ -10,6 +11,7 @@ class SensorBridge:
         self.hearing_uri = hearing_uri
         self.callback = event_callback
         self.running = False
+        self.message_count = 0  # Debug counter
 
     async def run(self):
         self.running = True
@@ -19,8 +21,6 @@ class SensorBridge:
         print(f"🔌 [Bridge] Waiting 5s for Vision subsystem to initialize...")
         await asyncio.sleep(5)
         
-        # CHANGE: Use a SINGLE connection instead of two
-        # Both vision and hearing come from the same WebSocket anyway
         await self._unified_loop()
 
     async def _unified_loop(self):
@@ -37,30 +37,38 @@ class SensorBridge:
                         if not self.running:
                             break
                         
+                        self.message_count += 1
+                        
                         try:
                             data = json.loads(message)
                             msg_type = data.get("type", "unknown")
                             
-                            # DEBUG: Print ALL messages except heartbeat
-                            if msg_type != "heartbeat":
-                                # print(f"📨 [Bridge] RAW MESSAGE: type={msg_type}, keys={list(data.keys())}")
-                                print('')
-
+                            # DEBUG: Print ALL messages (remove heartbeat filter temporarily)
+                            print(f"📨 [Bridge #{self.message_count}] type={msg_type}, keys={list(data.keys())}")
                             
                             # Handle vision updates
                             if msg_type == "text_update":
                                 content = data.get("content", "")
+                                print(f"👁️ [Bridge] Vision text_update received: {len(content)} chars")
                                 if content:
-                                    # print(f"👁️ [Bridge] Vision update: {content[:60]}...")
+                                    print(f"👁️ [Bridge] Content preview: {content[:100]}...")
                                     await self._parse_gemini_content(content)
                             
                             # Handle transcripts
                             elif msg_type in ["transcript", "partial_transcript"]:
-                                # print(f"👂 [Bridge] Transcript: {data.get('text', '')[:60]}...")
+                                text = data.get('text', '')
+                                source = data.get('source', 'unknown')
+                                print(f"👂 [Bridge] Transcript received: source={source}, text={text[:60] if text else '(empty)'}...")
                                 await self._parse_whisper_content(data)
+                            
+                            # DEBUG: Log unhandled message types
+                            elif msg_type != "heartbeat":
+                                print(f"❓ [Bridge] Unhandled message type: {msg_type}")
+                                print(f"   Data: {str(data)[:200]}")
                                 
                         except json.JSONDecodeError as e:
                             print(f"⚠️ [Bridge] JSON decode error: {e}")
+                            print(f"   Raw message: {message[:200]}")
                         except Exception as e:
                             print(f"⚠️ [Bridge] Message handling error: {e}")
                             import traceback
@@ -99,7 +107,7 @@ class SensorBridge:
         source_str = data.get("source", "desktop")
         
         if not text:
-            print("⚠️ [Bridge] Empty transcript text")
+            print("⚠️ [Bridge] Empty transcript text, skipping")
             return
 
         # Map to Director InputSource
@@ -114,7 +122,7 @@ class SensorBridge:
             "is_partial": data.get("is_partial", False) 
         }
 
-        print(f"✅ [Bridge] Sending transcript to callback: source={source.name}, text={text[:40]}...")
+        print(f"✅ [Bridge] Calling callback with: source={source.name}, text={text[:40]}...")
         
         try:
             await self.callback(
@@ -122,7 +130,7 @@ class SensorBridge:
                 text=text,
                 metadata=meta
             )
-            # print(f"✅ [Bridge] Callback completed successfully")
+            print(f"✅ [Bridge] Callback completed successfully")
         except Exception as e:
             print(f"❌ [Bridge] Callback error: {e}")
             import traceback
@@ -131,11 +139,12 @@ class SensorBridge:
     async def _parse_gemini_content(self, text):
         """Handle deep context from the slow vision AI."""
         if not self.callback:
-            print("⚠️ [Bridge] No callback set!")
+            print("⚠️ [Bridge] No callback set for vision!")
             return
         
         clean_text = text.strip()
         if not clean_text or clean_text.lower() in ["[silence]", "none", "n/a", "silence"]: 
+            print(f"⚠️ [Bridge] Skipping empty/silence vision text")
             return
 
         # 1. Try XML Parsing
@@ -143,6 +152,7 @@ class SensorBridge:
         matches = list(re.finditer(xml_pattern, clean_text))
         
         if matches:
+            print(f"📋 [Bridge] Found {len(matches)} XML tags in vision content")
             for match in matches:
                 tag = match.group(1).lower()
                 content = match.group(2).strip()
@@ -155,18 +165,24 @@ class SensorBridge:
                 if tag == "audio_context":
                     source = InputSource.AMBIENT_AUDIO
                 
-                print(f"✅ [Bridge] Sending XML vision to callback: tag={tag}")
+                print(f"✅ [Bridge] Sending XML vision to callback: tag={tag}, source={source.name}")
                 
-                await self.callback(
-                    source=source,
-                    text=content,
-                    metadata={
-                        "raw_tag": tag.upper(), 
-                        "confidence": 1.0, 
-                        "type": "gemini_analysis", 
-                        "xml_tag": tag
-                    }
-                )
+                try:
+                    await self.callback(
+                        source=source,
+                        text=content,
+                        metadata={
+                            "raw_tag": tag.upper(), 
+                            "confidence": 1.0, 
+                            "type": "gemini_analysis", 
+                            "xml_tag": tag
+                        }
+                    )
+                    print(f"✅ [Bridge] Vision callback completed for tag={tag}")
+                except Exception as e:
+                    print(f"❌ [Bridge] Vision callback error: {e}")
+                    import traceback
+                    traceback.print_exc()
             return
 
         # 2. Try Legacy Parsing
@@ -174,6 +190,7 @@ class SensorBridge:
         legacy_matches = list(re.finditer(legacy_pattern, clean_text, re.DOTALL | re.IGNORECASE))
         
         if legacy_matches:
+            print(f"📋 [Bridge] Found {len(legacy_matches)} legacy tags in vision content")
             for match in legacy_matches:
                 tag = match.group(1).upper()
                 content = match.group(2).strip()
@@ -185,22 +202,31 @@ class SensorBridge:
                 
                 print(f"✅ [Bridge] Sending legacy vision to callback: tag={tag}")
                 
-                await self.callback(
-                    source=source,
-                    text=content,
-                    metadata={"raw_tag": tag, "confidence": 1.0, "type": "gemini_analysis_legacy"}
-                )
+                try:
+                    await self.callback(
+                        source=source,
+                        text=content,
+                        metadata={"raw_tag": tag, "confidence": 1.0, "type": "gemini_analysis_legacy"}
+                    )
+                except Exception as e:
+                    print(f"❌ [Bridge] Legacy callback error: {e}")
             return
 
         # 3. Fallback: Plain Text
-        print(f"✅ [Bridge] Sending plain vision to callback")
+        print(f"✅ [Bridge] Sending plain vision to callback: {len(clean_text)} chars")
         
-        await self.callback(
-            source=InputSource.VISUAL_CHANGE,
-            text=clean_text,
-            metadata={
-                "raw_tag": "VISUAL", 
-                "confidence": 1.0, 
-                "type": "gemini_narrative"
-            }
-        )
+        try:
+            await self.callback(
+                source=InputSource.VISUAL_CHANGE,
+                text=clean_text,
+                metadata={
+                    "raw_tag": "VISUAL", 
+                    "confidence": 1.0, 
+                    "type": "gemini_narrative"
+                }
+            )
+            print(f"✅ [Bridge] Plain vision callback completed")
+        except Exception as e:
+            print(f"❌ [Bridge] Plain vision callback error: {e}")
+            import traceback
+            traceback.print_exc()

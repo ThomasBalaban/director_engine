@@ -5,6 +5,7 @@ import threading
 import webbrowser
 import signal as signal_module
 import time
+import traceback
 from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -28,7 +29,6 @@ app.mount('/socket.io', socket_app)
 base_path = Path(__file__).parent.resolve()
 ui_path = base_path / "ui"
 audio_path = base_path / "audio_effects"
-# NOTE: Static mounts moved to AFTER all API routes - see below
 
 # --- TASKS ---
 summary_ticker_task: Optional[asyncio.Task] = None
@@ -41,6 +41,11 @@ class EventPayload(BaseModel):
     text: str
     metadata: Dict[str, Any] = {}
     username: Optional[str] = None
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for monitoring."""
+    return {"status": "ok", "server_ready": shared.server_ready}
 
 @app.get("/audio_effects/{filename}")
 async def serve_audio_effect(filename: str):
@@ -57,7 +62,8 @@ async def get_summary():
 @app.get("/summary_data")
 async def get_summary_data():
     data = shared.store.get_summary_data()
-    if data['directive']: data['directive'] = data['directive'].to_dict()
+    if data['directive']: 
+        data['directive'] = data['directive'].to_dict()
     return data
 
 @app.get("/breadcrumbs")
@@ -67,42 +73,23 @@ async def get_breadcrumbs(count: int = 3):
     This is the bridge between Director (Brain 1) and Nami (Brain 2).
     """
     try:
-        print(f"📡 [/breadcrumbs] Request received (count={count})")
-        
         summary_data = shared.store.get_summary_data()
-        print(f"   Summary data keys: {list(summary_data.keys())}")
-        
         current_query = summary_data.get('summary', "") or " ".join(summary_data.get('topics', []))
-        print(f"   Query for memories: '{current_query[:50]}...' " if current_query else "   Query: (empty)")
-        
         smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
-        print(f"   Retrieved {len(smart_memories)} memories")
         
-        # Get the directive - handle None case
         directive = summary_data.get('directive')
-        print(f"   Directive: {type(directive).__name__ if directive else 'None'}")
         
-        # Build the formatted context
         formatted_context = await shared.prompt_constructor.construct_context_block(
             shared.store, directive, smart_memories[:3]
         )
-        
-        print(f"   Formatted context length: {len(formatted_context)} chars")
-        if len(formatted_context) < 100:
-            print(f"   Full context: {formatted_context}")
-        else:
-            print(f"   Context preview: {formatted_context[:150]}...")
         
         return {"formatted_context": formatted_context}
         
     except Exception as e:
         print(f"❌ [/breadcrumbs] Error: {type(e).__name__}: {e}")
-        import traceback
         traceback.print_exc()
-        # Return a meaningful error context instead of crashing
         return {"formatted_context": f"[Director Error: {str(e)}]"}
 
-# --- NEW: Speech state endpoint for HTTP fallback ---
 @app.get("/speech_state")
 async def get_speech_state():
     return {"is_speaking": shared.is_nami_speaking()}
@@ -117,7 +104,6 @@ async def speech_finished():
     shared.set_nami_speaking(False)
     return {"status": "ok"}
 
-# --- NEW: Lock state endpoints ---
 @app.get("/lock_states")
 async def get_lock_states():
     return {
@@ -126,9 +112,7 @@ async def get_lock_states():
     }
 
 # --- IMPORTANT: Mount static files AFTER all API routes ---
-# This prevents the catch-all "/" from intercepting API requests like /breadcrumbs
 app.mount("/static", StaticFiles(directory=ui_path, html=True), name="static")
-# The root mount MUST be last - it catches everything not matched above
 app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
 # --- SOCKET HANDLERS ---
@@ -136,21 +120,28 @@ app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 async def ingest_event(sid, payload: dict):
     try:
         model = EventPayload(**payload)
-        await core_logic.process_engine_event(config.InputSource[model.source_str], model.text, model.metadata, model.username)
+        await core_logic.process_engine_event(
+            config.InputSource[model.source_str], 
+            model.text, 
+            model.metadata, 
+            model.username
+        )
     except Exception as e:
-        print(f"Invalid event payload: {e}")
+        print(f"[DirectorEngine] Invalid event payload: {e}")
 
 @shared.sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
-    shared.emit_bot_reply(
-        payload.get('reply', ''), 
-        payload.get('prompt', ''), 
-        payload.get('is_censored', False),
-        payload.get('censorship_reason'),
-        payload.get('filtered_area')
-    )
-
-    shared.speech_dispatcher.register_user_response()
+    try:
+        shared.emit_bot_reply(
+            payload.get('reply', ''), 
+            payload.get('prompt', ''), 
+            payload.get('is_censored', False),
+            payload.get('censorship_reason'),
+            payload.get('filtered_area')
+        )
+        shared.speech_dispatcher.register_user_response()
+    except Exception as e:
+        print(f"[DirectorEngine] Error handling bot_reply: {e}")
 
 @shared.sio.on("speech_started")
 async def handle_speech_started(sid, payload: dict = None):
@@ -171,11 +162,10 @@ async def handle_set_streamer(sid, payload: dict):
 
 @shared.sio.on("set_manual_context")
 async def handle_set_manual_context(sid, payload: dict):
-    """Called when operator sets manual context (e.g., 'playing Phasmophobia')"""
+    """Called when operator sets manual context"""
     context = payload.get('context', '')
     shared.set_manual_context(context, from_ai=False)
 
-# --- NEW: Lock state handlers ---
 @shared.sio.on("set_streamer_lock")
 async def handle_set_streamer_lock(sid, payload: dict):
     """Called when operator toggles the streamer lock"""
@@ -190,20 +180,43 @@ async def handle_set_context_lock(sid, payload: dict):
 
 # --- SERVER LIFECYCLE ---
 def open_browser():
-    try: webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
-    except: pass
+    try: 
+        webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
+    except: 
+        pass
+
+async def run_ticker_with_recovery(ticker_func, name: str):
+    """Wrapper that restarts a ticker if it crashes."""
+    while shared.server_ready:
+        try:
+            await ticker_func()
+        except asyncio.CancelledError:
+            print(f"[{name}] Cancelled")
+            break
+        except Exception as e:
+            print(f"❌ [{name}] Crashed with error: {type(e).__name__}: {e}")
+            traceback.print_exc()
+            print(f"[{name}] Restarting in 5 seconds...")
+            await asyncio.sleep(5)
+            if shared.server_ready:
+                print(f"[{name}] Restarting...")
 
 def run_server():
     global summary_ticker_task, reflex_ticker_task, sensor_bridge_task
+    
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     shared.ui_event_loop = loop
     
     loop.run_until_complete(llm_analyst.create_http_client())
     
-    # Start Tickers
-    summary_ticker_task = loop.create_task(core_logic.summary_ticker())
-    reflex_ticker_task = loop.create_task(core_logic.reflex_ticker())
+    # Start Tickers with recovery wrappers
+    summary_ticker_task = loop.create_task(
+        run_ticker_with_recovery(core_logic.summary_ticker, "SummaryTicker")
+    )
+    reflex_ticker_task = loop.create_task(
+        run_ticker_with_recovery(core_logic.reflex_ticker, "ReflexTicker")
+    )
     
     sensor_bridge = SensorBridge(event_callback=core_logic.process_engine_event)
     sensor_bridge_task = loop.create_task(sensor_bridge.run())
@@ -212,40 +225,90 @@ def run_server():
     print("✅ Director Engine is READY")
     print(f"📡 API endpoints available at http://localhost:{config.DIRECTOR_PORT}/breadcrumbs")
     
-    server = uvicorn.Server(uvicorn.Config(app, host=config.DIRECTOR_HOST, port=config.DIRECTOR_PORT, log_level="warning", loop="asyncio"))
+    # Configure uvicorn with better settings
+    server_config = uvicorn.Config(
+        app, 
+        host=config.DIRECTOR_HOST, 
+        port=config.DIRECTOR_PORT, 
+        log_level="warning", 
+        loop="asyncio",
+        timeout_keep_alive=30,
+        ws_ping_interval=20,
+        ws_ping_timeout=20
+    )
+    server = uvicorn.Server(server_config)
+    
+    shutdown_event = asyncio.Event()
     
     def signal_handler():
         print("\n⚠️ Shutdown signal received...")
+        shared.server_ready = False
+        shutdown_event.set()
         server.should_exit = True
     
     for sig in (signal_module.SIGINT, signal_module.SIGTERM):
-        loop.add_signal_handler(sig, signal_handler)
+        try:
+            loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            # Windows doesn't support add_signal_handler
+            pass
     
     try:
         loop.run_until_complete(server.serve())
     except KeyboardInterrupt:
         print("\n⚠️ Keyboard interrupt")
+        shared.server_ready = False
     finally:
         print("\n🛑 DIRECTOR ENGINE SHUTDOWN INITIATED")
         shared.server_ready = False
         
-        # Cleanup Tasks
-        for task in [sensor_bridge_task, summary_ticker_task, reflex_ticker_task]:
+        # Cancel all tasks gracefully
+        tasks_to_cancel = [
+            (sensor_bridge_task, "SensorBridge"),
+            (summary_ticker_task, "SummaryTicker"),
+            (reflex_ticker_task, "ReflexTicker")
+        ]
+        
+        for task, name in tasks_to_cancel:
             if task and not task.done():
+                print(f"  Cancelling {name}...")
                 task.cancel()
-                try: loop.run_until_complete(asyncio.wait_for(task, timeout=2.0))
-                except: pass
+                try:
+                    loop.run_until_complete(asyncio.wait_for(task, timeout=3.0))
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                except Exception as e:
+                    print(f"  Error cancelling {name}: {e}")
         
         # Cleanup Services
-        try: loop.run_until_complete(llm_analyst.close_http_client())
-        except: pass
-        try: loop.run_until_complete(shared.speech_dispatcher.close())
-        except: pass
+        print("  Closing HTTP client...")
+        try:
+            loop.run_until_complete(llm_analyst.close_http_client())
+        except Exception as e:
+            print(f"  Error closing HTTP client: {e}")
+            
+        print("  Closing speech dispatcher...")
+        try:
+            loop.run_until_complete(shared.speech_dispatcher.close())
+        except Exception as e:
+            print(f"  Error closing speech dispatcher: {e}")
         
+        print("  Shutting down vision app...")
         process_manager.shutdown_vision_app()
+        
         time.sleep(1.0)
-        try: loop.close()
-        except: pass
+        
+        try:
+            # Cancel any remaining tasks
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.close()
+        except Exception as e:
+            print(f"  Error during final cleanup: {e}")
+            
         print("✅ SHUTDOWN COMPLETE")
 
 if __name__ == "__main__":

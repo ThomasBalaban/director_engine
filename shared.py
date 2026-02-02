@@ -2,6 +2,7 @@
 import asyncio
 import socketio
 import time
+import traceback
 from typing import Dict, Any, List, Optional
 import config
 from context.context_store import ContextStore, EventItem
@@ -18,22 +19,21 @@ from services.prompt_constructor import PromptConstructor
 from services.speech_dispatcher import SpeechDispatcher
 
 # --- GLOBAL SINGLETONS ---
+# Note: sio will be replaced by main.py with a properly configured server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 server_ready: bool = False
 
 # --- DIRECTOR MANUAL CONTEXT ---
-# Allows the operator to set context like "currently playing Phasmophobia"
 manual_context: str = ""
 current_streamer: str = "peepingotter"
 
-# --- NEW: Lock states for AI auto-fill ---
+# --- Lock states for AI auto-fill ---
 streamer_locked: bool = False
 context_locked: bool = False
 
 def set_manual_context(context: str, from_ai: bool = False):
     global manual_context, context_locked
-    # If locked and this is an AI update, ignore it
     if context_locked and from_ai:
         print(f"🔒 [Director] Context locked - AI update ignored")
         return False
@@ -48,7 +48,6 @@ def get_manual_context() -> str:
 
 def set_current_streamer(streamer_id: str, from_ai: bool = False):
     global current_streamer, streamer_locked
-    # If locked and this is an AI update, ignore it
     if streamer_locked and from_ai:
         print(f"🔒 [Director] Streamer locked - AI update ignored")
         return False
@@ -80,12 +79,11 @@ def is_context_locked() -> bool:
     return context_locked
 
 # --- SPEECH STATE TRACKING ---
-# Prevents Director from sending interjections while Nami is speaking
 nami_is_speaking: bool = False
 speech_started_time: float = 0.0
-SPEECH_TIMEOUT: float = 60.0  # Max time to wait for speech_finished (failsafe)
-last_speech_source: Optional[str] = None  # 'USER_DIRECT', 'IDLE_THOUGHT', etc.
-awaiting_user_response: bool = False  # True if we just responded to user and are waiting
+SPEECH_TIMEOUT: float = 60.0
+last_speech_source: Optional[str] = None
+awaiting_user_response: bool = False
 
 def set_nami_speaking(is_speaking: bool, source: str = None):
     """Thread-safe setter for speech state."""
@@ -100,7 +98,6 @@ def set_nami_speaking(is_speaking: bool, source: str = None):
         duration = time.time() - speech_started_time if speech_started_time else 0
         print(f"🔊 [Speech Lock] Nami finished speaking ({duration:.1f}s, was: {last_speech_source}) - Director resumed")
         
-        # If we just finished responding to user, set awaiting flag
         if last_speech_source == 'USER_DIRECT':
             awaiting_user_response = True
             print(f"⏳ [Speech Lock] Awaiting user response - idle suppressed")
@@ -124,14 +121,11 @@ def is_nami_speaking() -> bool:
     if not nami_is_speaking:
         return False
     
-    # Failsafe: If speech has been "ongoing" for too long, assume it finished
     if speech_started_time and (time.time() - speech_started_time) > SPEECH_TIMEOUT:
         print(f"⚠️ [Speech Lock] Timeout reached ({SPEECH_TIMEOUT}s) - forcing unlock")
         nami_is_speaking = False
         return False
     
-    # DEBUG: Log when we're blocking
-    print(f"🔇 [Speech Lock] Blocking - Nami is speaking (elapsed: {time.time() - speech_started_time:.1f}s)")
     return True
 
 # --- ENGINE INITIALIZATION ---
@@ -149,15 +143,32 @@ prompt_constructor = PromptConstructor()
 speech_dispatcher = SpeechDispatcher()
 
 # --- EMITTERS ---
-def _emit_threadsafe(event, data):
-    global ui_event_loop, server_ready
-    if not server_ready or ui_event_loop is None or ui_event_loop.is_closed():
+def _emit_threadsafe(event: str, data: dict):
+    """Thread-safe emit with better error handling."""
+    global ui_event_loop, server_ready, sio
+    
+    if not server_ready:
         return
+        
+    if ui_event_loop is None:
+        return
+        
     try:
-        asyncio.run_coroutine_threadsafe(sio.emit(event, data), ui_event_loop)
+        if ui_event_loop.is_closed():
+            return
+    except Exception:
+        return
+    
+    try:
+        future = asyncio.run_coroutine_threadsafe(sio.emit(event, data), ui_event_loop)
+        # Don't wait for result - fire and forget
     except RuntimeError as e:
-        if "closed" not in str(e).lower():
-            print(f"⚠️ UI Emit Error: {e}")
+        # Event loop closed or similar - ignore silently during shutdown
+        if "closed" not in str(e).lower() and server_ready:
+            print(f"⚠️ UI Emit Error ({event}): {e}")
+    except Exception as e:
+        if server_ready:
+            print(f"⚠️ UI Emit Error ({event}): {type(e).__name__}: {e}")
 
 def emit_vision_context(context): 
     _emit_threadsafe('vision_context', {'context': context})
@@ -190,7 +201,6 @@ def emit_event_scored(event: EventItem):
         'id': event.id 
     })
 
-# NEW: Emit AI context suggestions
 def emit_ai_context_suggestion(streamer: str = None, context: str = None):
     """Emit AI-generated context suggestions to the UI."""
     _emit_threadsafe('ai_context_suggestion', {
@@ -213,10 +223,8 @@ def emit_director_state(summary, raw_context, prediction, mood, conversation_sta
         'memories': memories,
         'directive': directive, 
         'adaptive': adaptive_state or {},
-        # Include manual context info
         'manual_context': get_manual_context(),
         'current_streamer': get_current_streamer(),
-        # NEW: Include lock states
         'streamer_locked': is_streamer_locked(),
         'context_locked': is_context_locked()
     })
