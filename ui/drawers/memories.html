@@ -1,0 +1,18 @@
+<div class="drawer-header">
+    <h2>💾 Memories</h2>
+    <button onclick="closeDebugDrawer()" class="close-btn">✕</button>
+</div>
+
+<div class="drawer-content">
+    <div id="memory-list" class="space-y-3">
+        <p class="text-gray-500 italic text-sm text-center">Waiting for highlights...</p>
+    </div>
+</div>
+
+<script>
+    // Immediately populate if we have data
+    if (window.updateMemoriesUI && window.lastDirectorState) {
+        window.updateMemoriesUI(window.lastDirectorState);
+    }
+</script>
+}

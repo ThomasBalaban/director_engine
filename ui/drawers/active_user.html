@@ -1,0 +1,16 @@
+<div class="drawer-header">
+    <h2>👤 Active User</h2>
+    <button onclick="closeDebugDrawer()" class="close-btn">✕</button>
+</div>
+
+<div class="drawer-content" id="user-content">
+    <p class="text-gray-500 italic text-sm text-center">No active user context.</p>
+</div>
+
+<script>
+    // Immediately populate if we have data
+    if (window.updateActiveUserUI && window.lastDirectorState) {
+        window.updateActiveUserUI(window.lastDirectorState);
+    }
+</script>
+}

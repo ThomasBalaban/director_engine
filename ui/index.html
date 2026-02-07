@@ -16,6 +16,21 @@
 
 <body class="h-screen overflow-hidden flex flex-col p-4 md:p-6 lg:p-8" style="margin-left: 60px;">
     <nav class="debug-nav">
+        <button class="debug-nav-btn" data-drawer="memories" data-tooltip="Memories"
+            onclick="openDebugDrawer('memories')">
+            💾
+        </button>
+        <button class="debug-nav-btn" data-drawer="active_user" data-tooltip="Active User"
+            onclick="openDebugDrawer('active_user')">
+            👤
+        </button>
+        <button class="debug-nav-btn" data-drawer="interest_graph" data-tooltip="Interest Graph"
+            onclick="openDebugDrawer('interest_graph')">
+            📈
+        </button>
+        
+        <div class="w-8 h-px bg-gray-700 my-2"></div>
+
         <button class="debug-nav-btn" data-drawer="thread_stats" data-tooltip="Thread Stats"
             onclick="openDebugDrawer('thread_stats')">
             🧵
@@ -46,9 +61,7 @@
                 </div>
             </div>
 
-            <!-- Director Controls Bar -->
             <div class="flex gap-4 items-center bg-[#2a2a2a] border border-[#444] rounded-lg p-3">
-                <!-- Streamer Dropdown with Lock -->
                 <div class="flex items-center gap-2">
                     <button id="streamer-lock-btn" class="lock-btn" onclick="toggleStreamerLock()"
                         title="Lock/Unlock AI auto-fill">
@@ -61,7 +74,6 @@
                     </select>
                 </div>
 
-                <!-- Context Input with Lock -->
                 <div class="flex items-center gap-2 flex-1">
                     <button id="context-lock-btn" class="lock-btn" onclick="toggleContextLock()"
                         title="Lock/Unlock AI auto-fill">
@@ -78,7 +90,6 @@
                     </button>
                 </div>
 
-                <!-- AI Suggestion Indicator -->
                 <div id="ai-suggestion-indicator" class="hidden items-center gap-2 text-xs">
                     <span class="text-purple-400">🤖 AI:</span>
                     <span id="ai-suggestion-text" class="text-purple-300 max-w-xs truncate"></span>
@@ -118,23 +129,11 @@
                     </div>
                 </div>
 
-                <div id="summary-panel" class="panel h-1/3 min-h-0">
+                <div id="summary-panel" class="panel flex-1 min-h-0">
                     <h2 class="panel-title">🧠 Situation Summary</h2>
                     <div class="panel-content">
                         <div class="summary-text" id="summary-text">Waiting for summary...</div>
                         <div class="summary-raw-context" id="summary-raw-context">Raw context...</div>
-                    </div>
-                </div>
-
-                <div id="interest-graph-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">📈 Interest Graph</h2>
-                    <div class="panel-content flex flex-col">
-                        <div class="flex-1 relative" style="width:100%; min-height: 120px;">
-                            <canvas id="interest-chart"></canvas>
-                        </div>
-                        <pre id="graph-data-log"
-                            class="text-xs text-gray-400 flex-none h-32 overflow-y-auto pt-2 border-t border-gray-700 mt-2">
-[Waiting for scores...]</pre>
                     </div>
                 </div>
             </div>
@@ -241,7 +240,7 @@
                     </div>
                 </div>
 
-                <div id="prediction-panel" class="panel flex-none min-h-0">
+                <div id="prediction-panel" class="panel flex-1 min-h-0">
                     <h2 class="panel-title">🔮 Anticipation</h2>
                     <div class="panel-content bg-[#252525]">
                         <p id="prediction-text" class="prediction-text text-sm text-gray-300 italic">Observing flow...
@@ -249,21 +248,6 @@
                     </div>
                 </div>
 
-                <div id="user-panel" class="panel flex-none min-h-0">
-                    <h2 class="panel-title">👤 Active User</h2>
-                    <div class="panel-content" id="user-content">
-                        <p class="text-gray-500 italic text-sm text-center">No active user context.</p>
-                    </div>
-                </div>
-
-                <div id="memory-panel" class="panel flex-1 min-h-0">
-                    <h2 class="panel-title">💾 Memories</h2>
-                    <div class="panel-content">
-                        <ul id="memory-list" class="space-y-3">
-                            <li class="text-gray-500 italic text-sm text-center">Waiting for highlights...</li>
-                        </ul>
-                    </div>
-                </div>
             </div>
 
         </div>
@@ -292,10 +276,10 @@
 
     <div id="debug-drawer-overlay" class="debug-drawer-overlay"></div>
     <aside id="debug-drawer" class="debug-drawer">
-        <div id="debug-drawer-content"></div>
+        <div id="debug-drawer-content" class="h-full flex flex-col"></div>
     </aside>
 
-    <script src="script.js?v=4"></script>
+    <script src="script.js?v=5"></script>
     <script src="drawer_controller.js"></script>
 </body>
 

@@ -1,6 +1,13 @@
 const socket = io("http://localhost:8002");
 
-// DOM Elements
+// --- GLOBAL STATE for Drawers ---
+window.lastDirectorState = null;
+window.graphLog = [];
+window.scoreLabels = [];
+window.scoreData = [];
+window.interestChart = null;
+
+// DOM Elements (Static ones only)
 const moodPill = document.getElementById('mood-pill');
 const moodText = document.getElementById('mood-text');
 const statePill = document.getElementById('state-pill');
@@ -8,9 +15,6 @@ const stateText = document.getElementById('state-text');
 const summaryEl = document.getElementById('summary-text');
 const summaryContextEl = document.getElementById('summary-raw-context');
 const predictionEl = document.getElementById('prediction-text');
-const userContentEl = document.getElementById('user-content');
-const memoryListEl = document.getElementById('memory-list');
-const graphDataLogEl = document.getElementById('graph-data-log');
 
 // Adaptive Metrics Elements
 const adaptiveStateLabel = document.getElementById('adaptive-state-label');
@@ -49,30 +53,34 @@ let streamerLocked = false;
 let contextLocked = false;
 let pendingAiContext = null;
 
-let lastAudioWasPartial = false;
-
 // Context Logs
 const visionLog = [];
 const spokenLog = [];
 const audioLog = [];
-const graphLog = []; 
 
 // Chart.js Setup
 const CHART_HISTORY_SIZE = 50;
-let interestChart;
-const scoreLabels = []; 
-const scoreData = [];
 
-function initializeChart() {
+// Exposed function for the Interest Graph drawer
+window.initializeChart = function() {
+    const ctxEl = document.getElementById('interest-chart');
+    if (!ctxEl) return;
     if (typeof Chart === 'undefined') return;
-    const ctx = document.getElementById('interest-chart').getContext('2d');
-    interestChart = new Chart(ctx, {
+    
+    const ctx = ctxEl.getContext('2d');
+    
+    // Destroy existing to prevent memory leaks or double-rendering
+    if (window.interestChart) {
+        window.interestChart.destroy();
+    }
+    
+    window.interestChart = new Chart(ctx, {
         type: 'line',
         data: {
-            labels: scoreLabels,
+            labels: window.scoreLabels,
             datasets: [{
                 label: 'Interest Score', 
-                data: scoreData, 
+                data: window.scoreData, 
                 borderColor: '#63e2b7', 
                 backgroundColor: 'rgba(99, 226, 183, 0.2)', 
                 tension: 0.3, 
@@ -91,7 +99,7 @@ function initializeChart() {
             plugins: { legend: { display: false } }
         }
     });
-}
+};
 
 // --- Lock Button Functions ---
 window.toggleStreamerLock = function() {
@@ -136,13 +144,11 @@ socket.on('ai_context_suggestion', (data) => {
             if (contextCharCount) {
                 contextCharCount.textContent = `${data.context.length}/120`;
             }
-            
-            // Visual feedback that AI updated it
             contextInput.classList.add('ai-updated');
             setTimeout(() => contextInput.classList.remove('ai-updated'), 2000);
         }
     } else if (data.context && contextLocked) {
-        // Show suggestion but don't apply (context is locked)
+        // Show suggestion but don't apply
         pendingAiContext = data.context;
         if (aiSuggestionText) aiSuggestionText.textContent = data.context;
         if (aiSuggestionIndicator) {
@@ -163,8 +169,6 @@ if (acceptAiSuggestionBtn) {
                 }
             }
             updateManualContext(pendingAiContext);
-            
-            // Hide the suggestion
             if (aiSuggestionIndicator) {
                 aiSuggestionIndicator.classList.add('hidden');
                 aiSuggestionIndicator.classList.remove('flex');
@@ -184,7 +188,6 @@ async function loadStreamers() {
         if (!select) return;
         
         select.innerHTML = '';
-        
         data.streamers.forEach(streamer => {
             const option = document.createElement('option');
             option.value = streamer.id;
@@ -209,7 +212,6 @@ function updateManualContext(contextText) {
     console.log('[Director] Set manual context:', contextText);
 }
 
-// Event listeners for controls
 const streamerSelectEl = document.getElementById('streamer-select');
 if (streamerSelectEl) {
     streamerSelectEl.addEventListener('change', (e) => {
@@ -234,14 +236,59 @@ if (contextInputEl) {
     });
 }
 
-// Initialize
 window.onload = () => {
-    initializeChart();
+    // Note: initializeChart is now called by the drawer script
     loadStreamers();
+};
+
+// --- UI UPDATE HELPERS (Exposed for Drawers) ---
+window.updateActiveUserUI = function(data) {
+    const userContentEl = document.getElementById('user-content');
+    if (!userContentEl) return;
+
+    if (data.active_user) {
+        const u = data.active_user;
+        userContentEl.innerHTML = `
+            <div class="user-card">
+                <div class="flex justify-between items-center mb-2">
+                    <h3>${u.username}</h3>
+                    <span class="user-badge">${u.relationship.tier}</span>
+                </div>
+                <div class="text-xs text-gray-400 mb-2">Nickname: <span class="text-white">${u.nickname}</span></div>
+                <div class="text-xs text-gray-400 mb-2">Affinity: <div class="w-full bg-gray-700 h-1 rounded mt-1"><div class="bg-purple-500 h-1 rounded" style="width: ${u.relationship.affinity}%"></div></div></div>
+                <div class="text-xs text-gray-300 mt-2 border-t border-[#444] pt-2">
+                    <strong>Facts:</strong>
+                    <ul class="list-disc pl-4 mt-1 text-gray-400">
+                        ${u.facts.slice(-3).map(f => `<li>${f.content}</li>`).join('')}
+                    </ul>
+                </div>
+            </div>
+        `;
+    } else {
+        userContentEl.innerHTML = `<p class="text-gray-500 italic text-sm text-center mt-4">No active user context.</p>`;
+    }
+};
+
+window.updateMemoriesUI = function(data) {
+    const memoryListEl = document.getElementById('memory-list');
+    if (!memoryListEl) return;
+
+    if (data.memories && data.memories.length > 0) {
+        memoryListEl.innerHTML = data.memories.map(mem => `
+            <li class="border-l-2 border-purple-500 pl-3 bg-[#2a2a2a] p-2 rounded text-sm">
+                <div class="flex justify-between"><span class="text-purple-400 text-xs font-bold">${mem.source}</span> <span class="text-gray-500 text-xs">${mem.score}</span></div>
+                <div class="text-gray-300 leading-snug">${mem.text}</div>
+            </li>
+        `).join('');
+    } else {
+        memoryListEl.innerHTML = '<li class="text-gray-500 italic text-sm text-center mt-4">No high-impact memories yet.</li>';
+    }
 };
 
 // --- State Handlers ---
 socket.on('director_state', (data) => {
+    window.lastDirectorState = data;
+
     // 1. Mood
     const mood = data.mood || 'Neutral';
     if (moodText) moodText.textContent = mood;
@@ -258,7 +305,7 @@ socket.on('director_state', (data) => {
         else statePill.className = "px-4 py-2 border-2 border-blue-500 bg-blue-900 rounded-full font-bold text-lg flex items-center gap-2 text-blue-100";
     }
 
-    // 3. Dynamics (Flow & Intent)
+    // 3. Dynamics
     if(flowText) flowText.textContent = data.flow || 'Unknown';
     if(intentText) intentText.textContent = data.intent || 'Unknown';
 
@@ -282,48 +329,31 @@ socket.on('director_state', (data) => {
         }
     }
 
-    // 6. Adaptive Metrics Update
+    // 6. Adaptive Metrics
     if (data.adaptive) {
         const a = data.adaptive;
-        
         if (adaptiveStateLabel) {
             adaptiveStateLabel.textContent = a.state || "Normal";
             if (a.state.includes("Chaos")) adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-red-900 text-red-200";
             else if (a.state.includes("Dead")) adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-blue-900 text-blue-200";
             else adaptiveStateLabel.className = "text-xs px-2 py-1 rounded bg-gray-700 text-gray-300";
         }
-
-        if (thresholdBar) {
-            const tVal = a.threshold || 0.9;
-            thresholdBar.style.width = `${tVal * 100}%`;
-            if(thresholdVal) thresholdVal.textContent = tVal.toFixed(2);
-        }
-
-        if (velocityBar) {
-            const vVal = a.chat_velocity || 0;
-            const vPct = Math.min((vVal / 40) * 100, 100); 
-            velocityBar.style.width = `${vPct}%`;
-            if(velocityVal) velocityVal.textContent = `${vVal.toFixed(1)} /m`;
-        }
-
-        if (energyBar) {
-            const eVal = a.energy || 0;
-            energyBar.style.width = `${eVal * 100}%`;
-            if(energyVal) energyVal.textContent = eVal.toFixed(2);
-        }
-
+        if (thresholdBar) thresholdBar.style.width = `${(a.threshold || 0.9) * 100}%`;
+        if (thresholdVal) thresholdVal.textContent = (a.threshold || 0.9).toFixed(2);
+        if (velocityBar) velocityBar.style.width = `${Math.min((a.chat_velocity || 0) / 40 * 100, 100)}%`;
+        if (velocityVal) velocityVal.textContent = `${(a.chat_velocity || 0).toFixed(1)} /m`;
+        if (energyBar) energyBar.style.width = `${(a.energy || 0) * 100}%`;
+        if (energyVal) energyVal.textContent = (a.energy || 0).toFixed(2);
         if (a.social_battery && batteryBar) {
-            const bat = a.social_battery;
-            batteryBar.style.width = `${bat.percent}%`;
-            if(batteryVal) batteryVal.textContent = `${bat.percent}%`;
-            
-            if (bat.percent < 20) batteryBar.className = "h-full bg-red-500 transition-all duration-500";
-            else if (bat.percent < 50) batteryBar.className = "h-full bg-yellow-500 transition-all duration-500";
+            batteryBar.style.width = `${a.social_battery.percent}%`;
+            if(batteryVal) batteryVal.textContent = `${a.social_battery.percent}%`;
+            if (a.social_battery.percent < 20) batteryBar.className = "h-full bg-red-500 transition-all duration-500";
+            else if (a.social_battery.percent < 50) batteryBar.className = "h-full bg-yellow-500 transition-all duration-500";
             else batteryBar.className = "h-full bg-green-500 transition-all duration-500";
         }
     }
     
-    // 7. Sync lock states from server
+    // 7. Lock states
     if (typeof data.streamer_locked !== 'undefined') {
         streamerLocked = data.streamer_locked;
         updateLockButtonUI(streamerLockBtn, streamerLocked);
@@ -333,42 +363,9 @@ socket.on('director_state', (data) => {
         updateLockButtonUI(contextLockBtn, contextLocked);
     }
     
-    // 8. User
-    if (data.active_user && userContentEl) {
-        const u = data.active_user;
-        userContentEl.innerHTML = `
-            <div class="user-card">
-                <div class="flex justify-between items-center mb-2">
-                    <h3>${u.username}</h3>
-                    <span class="user-badge">${u.relationship.tier}</span>
-                </div>
-                <div class="text-xs text-gray-400 mb-2">Nickname: <span class="text-white">${u.nickname}</span></div>
-                <div class="text-xs text-gray-400 mb-2">Affinity: <div class="w-full bg-gray-700 h-1 rounded mt-1"><div class="bg-purple-500 h-1 rounded" style="width: ${u.relationship.affinity}%"></div></div></div>
-                <div class="text-xs text-gray-300 mt-2 border-t border-[#444] pt-2">
-                    <strong>Facts:</strong>
-                    <ul class="list-disc pl-4 mt-1 text-gray-400">
-                        ${u.facts.slice(-3).map(f => `<li>${f.content}</li>`).join('')}
-                    </ul>
-                </div>
-            </div>
-        `;
-    } else if (userContentEl) {
-        userContentEl.innerHTML = `<p class="text-gray-500 italic text-sm text-center mt-4">No active user context.</p>`;
-    }
-    
-    // 9. Memories
-    if (memoryListEl) {
-        if (data.memories && data.memories.length > 0) {
-            memoryListEl.innerHTML = data.memories.map(mem => `
-                <li class="border-l-2 border-purple-500 pl-3 bg-[#2a2a2a] p-2 rounded text-sm">
-                    <div class="flex justify-between"><span class="text-purple-400 text-xs font-bold">${mem.source}</span> <span class="text-gray-500 text-xs">${mem.score}</span></div>
-                    <div class="text-gray-300 leading-snug">${mem.text}</div>
-                </li>
-            `).join('');
-        } else {
-            memoryListEl.innerHTML = '<li class="text-gray-500 italic text-sm text-center mt-4">No high-impact memories yet.</li>';
-        }
-    }
+    // 8. Dynamic Drawer Updates (Check if elements exist first)
+    updateActiveUserUI(data);
+    updateMemoriesUI(data);
 });
 
 // --- Log Helpers ---
@@ -396,7 +393,6 @@ function updateAmbientLog(elementId, logArray, newText, itemClass = '', isUpdate
         if (itemClass) div.className = itemClass;
         el.appendChild(div);
     });
-
     el.parentElement.scrollTop = el.parentElement.scrollHeight;
 }
 
@@ -438,27 +434,35 @@ socket.on('audio_context', d => {
         if (d.session_id) div.id = `session-${d.session_id}`;
         div.className = 'audio-highlight';
         div.textContent = d.context;
-        
         logContainer.appendChild(div);
         logContainer.parentElement.scrollTop = logContainer.parentElement.scrollHeight;
     }
 });
 
 socket.on('event_scored', (data) => {
-    if (interestChart) {
-        scoreLabels.push(""); 
-        scoreData.push(data.score.toFixed(2));
-        if (scoreData.length > CHART_HISTORY_SIZE) { 
-            scoreLabels.shift(); 
-            scoreData.shift(); 
-        }
-        interestChart.update('none');
+    // Push to global data
+    window.scoreLabels.push(""); 
+    window.scoreData.push(data.score.toFixed(2));
+    if (window.scoreData.length > CHART_HISTORY_SIZE) { 
+        window.scoreLabels.shift(); 
+        window.scoreData.shift(); 
+    }
+    
+    // Update chart if it exists
+    if (window.interestChart) {
+        window.interestChart.update('none');
     }
     
     const logLine = `${data.score.toFixed(2)} - ${data.source}: ${data.text.substring(0,30)}...`;
-    graphLog.push(logLine);
-    if(graphLog.length > 10) graphLog.shift();
-    if(graphDataLogEl) graphDataLogEl.textContent = graphLog.join('\n');
+    window.graphLog.push(logLine);
+    if(window.graphLog.length > 10) window.graphLog.shift();
+    
+    // Update log if it exists
+    const graphDataLogEl = document.getElementById('graph-data-log');
+    if(graphDataLogEl) {
+        graphDataLogEl.textContent = window.graphLog.join('\n');
+        graphDataLogEl.scrollTop = graphDataLogEl.scrollHeight;
+    }
 });
 
 socket.on('twitch_message', (data) => {
@@ -503,34 +507,19 @@ socket.on('bot_reply', (data) => {
         </div>`;
     
     appendLog(document.getElementById('twitch-messages'), chatHTML);
-    
-    console.log('[bot_reply] Received:', {
-        is_censored: isCensored,
-        reason: reason,
-        filtered_area: filteredArea
-    });
 });
 
+// Reuse drawer functions
 window.openDrawer = function(el) {
-    console.log('[openDrawer] Element attributes:', {
-        'data-censored': el.getAttribute('data-censored'),
-        'data-reason': el.getAttribute('data-reason'),
-        'data-filtered-area': el.getAttribute('data-filtered-area'),
-        'data-reply': el.getAttribute('data-reply') ? 'present' : 'missing',
-        'data-sent': el.getAttribute('data-sent') ? 'present' : 'missing'
-    });
-    
+    // ... same content as before ...
     const sent = decodeURIComponent(el.getAttribute('data-sent') || '');
     const replyRaw = decodeURIComponent(el.getAttribute('data-reply') || '');
     const isCensored = el.getAttribute('data-censored') === 'true';
     const reason = decodeURIComponent(el.getAttribute('data-reason') || 'Unknown');
     const filteredArea = decodeURIComponent(el.getAttribute('data-filtered-area') || '');
     
-    console.log('[openDrawer] Parsed values:', { isCensored, reason, filteredArea, replyLength: replyRaw.length });
-    
     document.getElementById('drawer-sent').textContent = sent || '(No prompt data available)';
     const replyEl = document.getElementById('drawer-reply');
-    
     replyEl.innerHTML = '';
     replyEl.style.borderColor = '#3a3a3a';
     replyEl.style.backgroundColor = '#1f1f1f';
