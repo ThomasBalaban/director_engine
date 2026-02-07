@@ -1,0 +1,89 @@
+<!-- Thread Stats Drawer -->
+<div class="drawer-header">
+    <h2>🧵 Conversation Threading</h2>
+    <button onclick="closeDebugDrawer()" class="close-btn">✕</button>
+</div>
+
+<div class="drawer-content">
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-label">Total Threads</div>
+            <div class="stat-value" id="thread-total">-</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Active</div>
+            <div class="stat-value text-green-400" id="thread-active">-</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Pending</div>
+            <div class="stat-value text-yellow-400" id="thread-pending">-</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Resolved</div>
+            <div class="stat-value text-blue-400" id="thread-resolved">-</div>
+        </div>
+    </div>
+
+    <div class="mt-6">
+        <h3 class="text-lg font-bold text-purple-400 mb-3">Current Thread</h3>
+        <div id="thread-current" class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+            <p class="text-gray-500 italic text-center">No active thread</p>
+        </div>
+    </div>
+
+    <div class="mt-6">
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="text-lg font-bold text-purple-400">Thread History</h3>
+            <button onclick="refreshThreadStats()" class="refresh-btn">🔄 Refresh</button>
+        </div>
+        <div id="thread-history" class="space-y-2">
+            <p class="text-gray-500 italic text-center py-4">Loading...</p>
+        </div>
+    </div>
+</div>
+
+<script>
+async function refreshThreadStats() {
+    try {
+        const res = await fetch('/thread_stats');
+        const data = await res.json();
+        
+        // Update stats
+        document.getElementById('thread-total').textContent = data.total_threads || 0;
+        document.getElementById('thread-active').textContent = data.active_threads || 0;
+        document.getElementById('thread-pending').textContent = data.pending_threads || 0;
+        document.getElementById('thread-resolved').textContent = data.resolved_threads || 0;
+        
+        // Current thread
+        const currentEl = document.getElementById('thread-current');
+        if (data.current_thread) {
+            currentEl.innerHTML = `
+                <div class="text-sm text-gray-300">${data.current_thread}</div>
+            `;
+        } else {
+            currentEl.innerHTML = '<p class="text-gray-500 italic text-center">No active thread</p>';
+        }
+        
+        // Thread history (if available in future)
+        const historyEl = document.getElementById('thread-history');
+        historyEl.innerHTML = '<p class="text-gray-500 italic text-center py-2">History tracking coming soon...</p>';
+        
+    } catch (error) {
+        console.error('Error fetching thread stats:', error);
+    }
+}
+
+// Auto-refresh every 3 seconds when drawer is open
+let threadStatsInterval;
+function startThreadStatsRefresh() {
+    refreshThreadStats();
+    threadStatsInterval = setInterval(refreshThreadStats, 3000);
+}
+
+function stopThreadStatsRefresh() {
+    if (threadStatsInterval) {
+        clearInterval(threadStatsInterval);
+        threadStatsInterval = null;
+    }
+}
+</script>

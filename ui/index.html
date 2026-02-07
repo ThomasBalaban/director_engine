@@ -13,7 +13,18 @@
     <link rel="stylesheet" href="style.css">
 </head>
 
-<body class="h-screen overflow-hidden flex flex-col p-4 md:p-6 lg:p-8">
+<body class="h-screen overflow-hidden flex flex-col p-4 md:p-6 lg:p-8" style="margin-left: 60px;">
+    <nav class="debug-nav">
+        <button class="debug-nav-btn" data-drawer="thread_stats" data-tooltip="Thread Stats" onclick="openDebugDrawer('thread_stats')">
+            🧵
+        </button>
+        <button class="debug-nav-btn" data-drawer="prompt_debug" data-tooltip="Prompt Debug" onclick="openDebugDrawer('prompt_debug')">
+            🧠
+        </button>
+        <button class="debug-nav-btn" data-drawer="run_tests" data-tooltip="Run Tests" onclick="openDebugDrawer('run_tests')">
+            🧪
+        </button>
+    </nav>
     <div class="max-w-screen-2xl mx-auto w-full flex flex-col flex-1 min-h-0">
         <header class="mb-4 flex-shrink-0">
             <div class="flex justify-between items-center mb-3">
@@ -253,6 +264,13 @@
         </div>
     </aside>
 
+    <div id="debug-drawer-overlay" class="debug-drawer-overlay"></div>
+    <aside id="debug-drawer" class="debug-drawer">
+    <div id="debug-drawer-content"></div>
+</aside>
+
+
     <script src="script.js?v=4"></script>
+    <script src="drawer_controller.js"></script>
 </body>
 </html>

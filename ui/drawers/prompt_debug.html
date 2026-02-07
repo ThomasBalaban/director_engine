@@ -1,0 +1,201 @@
+<!-- Prompt Debug Drawer -->
+<div class="drawer-header">
+    <h2>🧠 Prompt Inspector</h2>
+    <button onclick="closeDebugDrawer()" class="close-btn">✕</button>
+</div>
+
+<div class="drawer-content">
+    <!-- Metrics Bar -->
+    <div class="metrics-bar">
+        <div class="metric-item">
+            <div class="metric-label">Prompt Size</div>
+            <div class="metric-value" id="prompt-size">-</div>
+            <div class="metric-unit">chars</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-label">Est. Tokens</div>
+            <div class="metric-value" id="prompt-tokens">-</div>
+            <div class="metric-unit">~tokens</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-label">Detail Mode</div>
+            <div class="metric-value text-sm" id="prompt-detail">-</div>
+        </div>
+        <div class="metric-item">
+            <div class="metric-label">Scene</div>
+            <div class="metric-value text-sm" id="prompt-scene">-</div>
+        </div>
+    </div>
+
+    <!-- Tab Navigation -->
+    <div class="tab-nav">
+        <button class="tab-btn active" onclick="switchPromptTab('raw')" id="tab-raw">📄 Raw Prompt</button>
+        <button class="tab-btn" onclick="switchPromptTab('structured')" id="tab-structured">🏗️ Structured</button>
+        <button class="tab-btn" onclick="switchPromptTab('stats')" id="tab-stats">📊 Stats</button>
+    </div>
+
+    <!-- Tab Content -->
+    <div id="prompt-tab-raw" class="tab-content-prompt active">
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="text-sm font-bold text-gray-400">Current Prompt to Nami</h3>
+            <button onclick="refreshPromptDebug()" class="refresh-btn">🔄 Refresh</button>
+        </div>
+        <pre id="prompt-raw-text" class="prompt-code">Loading...</pre>
+    </div>
+
+    <div id="prompt-tab-structured" class="tab-content-prompt">
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="text-sm font-bold text-gray-400">Prompt Structure</h3>
+            <button onclick="refreshPromptDebug()" class="refresh-btn">🔄 Refresh</button>
+        </div>
+        <div id="prompt-structured-sections" class="space-y-3">
+            Loading...
+        </div>
+    </div>
+
+    <div id="prompt-tab-stats" class="tab-content-prompt">
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="text-sm font-bold text-gray-400">Detailed Stats</h3>
+            <button onclick="refreshPromptDebug()" class="refresh-btn">🔄 Refresh</button>
+        </div>
+        <div class="stats-detail-grid" id="prompt-stats-detail">
+            Loading...
+        </div>
+    </div>
+</div>
+
+<script>
+let currentPromptTab = 'raw';
+
+function switchPromptTab(tab) {
+    // Hide all tabs
+    document.querySelectorAll('.tab-content-prompt').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+    
+    // Show selected
+    document.getElementById(`prompt-tab-${tab}`).classList.add('active');
+    document.getElementById(`tab-${tab}`).classList.add('active');
+    
+    currentPromptTab = tab;
+}
+
+async function refreshPromptDebug() {
+    try {
+        const [debugRes, sizeRes] = await Promise.all([
+            fetch('/prompt_debug'),
+            fetch('/prompt_size')
+        ]);
+        
+        const debugData = await debugRes.json();
+        const sizeData = await sizeRes.json();
+        
+        // Update metrics
+        document.getElementById('prompt-size').textContent = sizeData.char_count?.toLocaleString() || '-';
+        document.getElementById('prompt-tokens').textContent = sizeData.estimated_tokens?.toLocaleString() || '-';
+        document.getElementById('prompt-detail').textContent = debugData.detail_mode || 'N/A';
+        document.getElementById('prompt-scene').textContent = debugData.scene || 'N/A';
+        
+        // Update raw prompt
+        const promptText = debugData.formatted_context || 'No data';
+        document.getElementById('prompt-raw-text').textContent = promptText;
+        
+        // Update structured view
+        updateStructuredView(promptText);
+        
+        // Update stats
+        updatePromptStats(debugData, sizeData);
+        
+    } catch (error) {
+        console.error('Error refreshing prompt debug:', error);
+        document.getElementById('prompt-raw-text').textContent = 'Error loading data';
+    }
+}
+
+function updateStructuredView(promptText) {
+    const container = document.getElementById('prompt-structured-sections');
+    container.innerHTML = '';
+    
+    // Parse XML-like sections
+    const tagRegex = /<(\w+)[^>]*>([\s\S]*?)<\/\1>/g;
+    let match;
+    const sections = [];
+    
+    while ((match = tagRegex.exec(promptText)) !== null) {
+        const tagName = match[1];
+        const content = match[2].trim();
+        
+        let priority = 'low';
+        if (content.includes('priority="CRITICAL"') || tagName === 'directive') {
+            priority = 'critical';
+        } else if (content.includes('priority="HIGH"') || tagName === 'focus') {
+            priority = 'high';
+        }
+        
+        sections.push({
+            title: tagName.replace(/_/g, ' ').toUpperCase(),
+            content: content,
+            priority: priority
+        });
+    }
+    
+    // Render sections
+    if (sections.length === 0) {
+        container.innerHTML = '<p class="text-gray-500 italic text-center py-4">No structured sections found</p>';
+    } else {
+        sections.forEach(section => {
+            const div = document.createElement('div');
+            div.className = `section-card priority-${section.priority}`;
+            div.innerHTML = `
+                <div class="section-header">
+                    <span class="section-title">${section.title}</span>
+                    <span class="section-badge">${section.priority}</span>
+                </div>
+                <pre class="section-content">${section.content.substring(0, 500)}${section.content.length > 500 ? '...' : ''}</pre>
+            `;
+            container.appendChild(div);
+        });
+    }
+}
+
+function updatePromptStats(debugData, sizeData) {
+    const container = document.getElementById('prompt-stats-detail');
+    const threadStats = debugData.thread_stats || {};
+    
+    container.innerHTML = `
+        <div class="stat-detail-item">
+            <span class="stat-detail-label">Total Lines:</span>
+            <span class="stat-detail-value">${sizeData.lines || 0}</span>
+        </div>
+        <div class="stat-detail-item">
+            <span class="stat-detail-label">XML Sections:</span>
+            <span class="stat-detail-value">${sizeData.sections || 0}</span>
+        </div>
+        <div class="stat-detail-item">
+            <span class="stat-detail-label">Memory Count:</span>
+            <span class="stat-detail-value">${debugData.memory_count || 0}</span>
+        </div>
+        <div class="stat-detail-item">
+            <span class="stat-detail-label">Active Threads:</span>
+            <span class="stat-detail-value">${threadStats.active_threads || 0}</span>
+        </div>
+        <div class="stat-detail-item">
+            <span class="stat-detail-label">Pending Threads:</span>
+            <span class="stat-detail-value">${threadStats.pending_threads || 0}</span>
+        </div>
+    `;
+}
+
+// Auto-refresh
+let promptDebugInterval;
+function startPromptDebugRefresh() {
+    refreshPromptDebug();
+    promptDebugInterval = setInterval(refreshPromptDebug, 5000);
+}
+
+function stopPromptDebugRefresh() {
+    if (promptDebugInterval) {
+        clearInterval(promptDebugInterval);
+        promptDebugInterval = null;
+    }
+}
+</script>
