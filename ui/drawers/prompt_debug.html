@@ -185,17 +185,19 @@ function updatePromptStats(debugData, sizeData) {
     `;
 }
 
-// Auto-refresh
-let promptDebugInterval;
+// Auto-refresh - use window property to avoid redeclaration
 function startPromptDebugRefresh() {
     refreshPromptDebug();
-    promptDebugInterval = setInterval(refreshPromptDebug, 5000);
+    if (window.promptDebugInterval) {
+        clearInterval(window.promptDebugInterval);
+    }
+    window.promptDebugInterval = setInterval(refreshPromptDebug, 5000);
 }
 
 function stopPromptDebugRefresh() {
-    if (promptDebugInterval) {
-        clearInterval(promptDebugInterval);
-        promptDebugInterval = null;
+    if (window.promptDebugInterval) {
+        clearInterval(window.promptDebugInterval);
+        window.promptDebugInterval = null;
     }
 }
 </script>

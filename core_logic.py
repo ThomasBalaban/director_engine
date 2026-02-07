@@ -230,12 +230,15 @@ def build_smart_memory_query(store, summary_data: Dict[str, Any]) -> str:
     
     # === INTENT-AWARE ADDITIONS ===
     intent = store.current_intent
-    
+
     if intent == UserIntent.VALIDATION:
         # Pull memories of past praise/criticism
-        priority_keywords.extend(["good job", "well done", "nice", "amazing", "great"])
+        validation_keywords = ["good job", "well done", "nice", "amazing", "great"]
+        priority_keywords.extend(validation_keywords)
+        # Ensure validation keywords always appear in query
+        query_parts.insert(0, "praise validation " + " ".join(validation_keywords[:3]))
         print(f"🧠 [Memory Query] User seeking validation - adding praise memories")
-    
+
     elif intent == UserIntent.HELP_SEEKING:
         # Pull memories of solutions, tips, strategies
         priority_keywords.extend(["how to", "solution", "fix", "try", "strategy", "worked"])

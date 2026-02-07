@@ -74,16 +74,19 @@ async function refreshThreadStats() {
 }
 
 // Auto-refresh every 3 seconds when drawer is open
-let threadStatsInterval;
+// Use window property to avoid redeclaration
 function startThreadStatsRefresh() {
     refreshThreadStats();
-    threadStatsInterval = setInterval(refreshThreadStats, 3000);
+    if (window.threadStatsInterval) {
+        clearInterval(window.threadStatsInterval);
+    }
+    window.threadStatsInterval = setInterval(refreshThreadStats, 3000);
 }
 
 function stopThreadStatsRefresh() {
-    if (threadStatsInterval) {
-        clearInterval(threadStatsInterval);
-        threadStatsInterval = null;
+    if (window.threadStatsInterval) {
+        clearInterval(window.threadStatsInterval);
+        window.threadStatsInterval = null;
     }
 }
 </script>

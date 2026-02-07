@@ -33,6 +33,20 @@ async function openDebugDrawer(drawerName) {
         const html = await response.text();
         content.innerHTML = html;
         
+        // CRITICAL FIX: Execute scripts in the loaded HTML
+        const scripts = content.querySelectorAll('script');
+        scripts.forEach(script => {
+            const newScript = document.createElement('script');
+            if (script.src) {
+                newScript.src = script.src;
+            } else {
+                newScript.textContent = script.textContent;
+            }
+            document.body.appendChild(newScript);
+            // Remove it after execution to avoid duplicates
+            setTimeout(() => newScript.remove(), 100);
+        });
+        
         // Update nav button states
         document.querySelectorAll('.debug-nav-btn').forEach(btn => {
             btn.classList.remove('active');
@@ -46,10 +60,16 @@ async function openDebugDrawer(drawerName) {
         currentDebugDrawer = drawerName;
         
         // Start refresh for this drawer (if it has a refresh function)
-        const refreshFnName = `start${drawerName.charAt(0).toUpperCase() + drawerName.slice(1).replace(/_/g, '')}Refresh`;
-        if (typeof window[refreshFnName] === 'function') {
-            window[refreshFnName]();
-        }
+        // Give scripts time to load
+        setTimeout(() => {
+            const refreshFnName = `start${drawerName.charAt(0).toUpperCase() + drawerName.slice(1).replace(/_/g, '')}Refresh`;
+            if (typeof window[refreshFnName] === 'function') {
+                console.log(`[Drawer] Starting auto-refresh: ${refreshFnName}`);
+                window[refreshFnName]();
+            } else {
+                console.log(`[Drawer] No refresh function found: ${refreshFnName}`);
+            }
+        }, 200);
         
     } catch (error) {
         console.error('Error loading drawer:', error);
@@ -87,7 +107,11 @@ function stopAllDrawerRefreshes() {
     
     stopFunctions.forEach(fnName => {
         if (typeof window[fnName] === 'function') {
-            window[fnName]();
+            try {
+                window[fnName]();
+            } catch (e) {
+                console.warn(`[Drawer] Error stopping ${fnName}:`, e);
+            }
         }
     });
 }
