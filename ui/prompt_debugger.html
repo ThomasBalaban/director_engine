@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prompt Debugger - Director Engine</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .xml-tag { color: #22c55e; font-weight: 600; }
+        .xml-attr { color: #fbbf24; }
+        .xml-content { color: #e5e7eb; }
+        .priority-critical { border-left: 4px solid #ef4444; background: rgba(239, 68, 68, 0.1); }
+        .priority-high { border-left: 4px solid #f59e0b; background: rgba(245, 158, 11, 0.1); }
+        .priority-low { border-left: 4px solid #6b7280; background: rgba(107, 114, 128, 0.05); }
+        .metric-good { color: #22c55e; }
+        .metric-warn { color: #fbbf24; }
+        .metric-bad { color: #ef4444; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100">
+    <div class="container mx-auto p-6 max-w-7xl">
+        <!-- Header -->
+        <div class="mb-6 flex justify-between items-center">
+            <h1 class="text-3xl font-bold text-white">🧠 Prompt Debugger</h1>
+            <button onclick="refreshData()" class="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded font-medium transition-colors">
+                🔄 Refresh
+            </button>
+        </div>
+
+        <!-- Metrics Dashboard -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div class="text-sm text-gray-400 mb-1">Prompt Size</div>
+                <div id="metric-size" class="text-2xl font-bold">-</div>
+                <div class="text-xs text-gray-500 mt-1">characters</div>
+            </div>
+            <div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div class="text-sm text-gray-400 mb-1">Est. Tokens</div>
+                <div id="metric-tokens" class="text-2xl font-bold">-</div>
+                <div class="text-xs text-gray-500 mt-1">~4 chars/token</div>
+            </div>
+            <div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div class="text-sm text-gray-400 mb-1">Detail Mode</div>
+                <div id="metric-detail" class="text-2xl font-bold">-</div>
+                <div class="text-xs text-gray-500 mt-1">adaptive control</div>
+            </div>
+            <div class="bg-gray-800 border border-gray-700 rounded-lg p-4">
+                <div class="text-sm text-gray-400 mb-1">Active Thread</div>
+                <div id="metric-thread" class="text-2xl font-bold">-</div>
+                <div class="text-xs text-gray-500 mt-1">conversation</div>
+            </div>
+        </div>
+
+        <!-- Tab Navigation -->
+        <div class="flex gap-2 mb-4 border-b border-gray-700">
+            <button onclick="switchTab('prompt')" id="tab-prompt" class="tab-btn active">
+                📄 Full Prompt
+            </button>
+            <button onclick="switchTab('structured')" id="tab-structured" class="tab-btn">
+                🏗️ Structured View
+            </button>
+            <button onclick="switchTab('stats')" id="tab-stats" class="tab-btn">
+                📊 Statistics
+            </button>
+            <button onclick="switchTab('tests')" id="tab-tests" class="tab-btn">
+                🧪 Quality Tests
+            </button>
+        </div>
+
+        <!-- Tab Content -->
+        <div id="content-prompt" class="tab-content">
+            <div class="bg-gray-800 border border-gray-700 rounded-lg p-6">
+                <h2 class="text-xl font-bold mb-4 text-purple-400">Current Prompt to Nami</h2>
+                <pre id="prompt-raw" class="bg-black p-4 rounded overflow-x-auto text-sm font-mono whitespace-pre-wrap">Loading...</pre>
+            </div>
+        </div>
+
+        <div id="content-structured" class="tab-content hidden">
+            <div class="space-y-4" id="structured-sections">
+                Loading...
+            </div>
+        </div>
+
+        <div id="content-stats" class="tab-content hidden">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-6">
+                    <h3 class="text-lg font-bold mb-4 text-purple-400">Context Stats</h3>
+                    <div class="space-y-2" id="context-stats">
+                        Loading...
+                    </div>
+                </div>
+                <div class="bg-gray-800 border border-gray-700 rounded-lg p-6">
+                    <h3 class="text-lg font-bold mb-4 text-purple-400">Memory Stats</h3>
+                    <div class="space-y-2" id="memory-stats">
+                        Loading...
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="content-tests" class="tab-content hidden">
+            <div class="bg-gray-800 border border-gray-700 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold text-purple-400">Quality Tests</h2>
+                    <button onclick="runTests()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded font-medium transition-colors">
+                        ▶️ Run Tests
+                    </button>
+                </div>
+                <div id="test-results">
+                    Click "Run Tests" to verify improvements are working
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'prompt';
+
+        function switchTab(tab) {
+            // Hide all
+            document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+            document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+            
+            // Show selected
+            document.getElementById(`content-${tab}`).classList.remove('hidden');
+            document.getElementById(`tab-${tab}`).classList.add('active');
+            
+            currentTab = tab;
+        }
+
+        async function refreshData() {
+            try {
+                // Get prompt data
+                const debugRes = await fetch('/prompt_debug');
+                const debugData = await debugRes.json();
+                
+                const sizeRes = await fetch('/prompt_size');
+                const sizeData = await sizeRes.json();
+                
+                // Update metrics
+                document.getElementById('metric-size').textContent = sizeData.char_count.toLocaleString();
+                document.getElementById('metric-tokens').textContent = sizeData.estimated_tokens.toLocaleString();
+                document.getElementById('metric-detail').textContent = debugData.detail_mode || 'N/A';
+                
+                const threadStatus = debugData.thread_stats?.current_thread || 'None';
+                document.getElementById('metric-thread').textContent = threadStatus === 'None' ? 'None' : '✓ Active';
+                
+                // Update full prompt
+                const promptText = debugData.formatted_context;
+                document.getElementById('prompt-raw').textContent = promptText;
+                
+                // Update structured view
+                updateStructuredView(promptText);
+                
+                // Update stats
+                updateStats(debugData, sizeData);
+                
+            } catch (error) {
+                console.error('Error refreshing:', error);
+                document.getElementById('prompt-raw').textContent = 'Error loading data. Make sure debug endpoints are enabled.';
+            }
+        }
+
+        function updateStructuredView(promptText) {
+            const container = document.getElementById('structured-sections');
+            container.innerHTML = '';
+            
+            // Parse XML-like sections
+            const sections = parsePromptSections(promptText);
+            
+            sections.forEach(section => {
+                const div = document.createElement('div');
+                div.className = `bg-gray-800 border border-gray-700 rounded-lg p-4 ${section.priority}`;
+                
+                div.innerHTML = `
+                    <div class="flex justify-between items-center mb-2">
+                        <h3 class="text-lg font-bold">${section.title}</h3>
+                        <span class="text-xs bg-gray-700 px-2 py-1 rounded">${section.type}</span>
+                    </div>
+                    <pre class="text-sm bg-black p-3 rounded overflow-x-auto whitespace-pre-wrap">${section.content}</pre>
+                `;
+                
+                container.appendChild(div);
+            });
+        }
+
+        function parsePromptSections(text) {
+            const sections = [];
+            
+            // Look for XML tags
+            const tagRegex = /<(\w+)[^>]*>([\s\S]*?)<\/\1>/g;
+            let match;
+            
+            while ((match = tagRegex.exec(text)) !== null) {
+                const tagName = match[1];
+                const content = match[2].trim();
+                
+                // Determine priority
+                let priority = 'priority-low';
+                if (content.includes('priority="CRITICAL"') || tagName === 'directive') {
+                    priority = 'priority-critical';
+                } else if (content.includes('priority="HIGH"') || tagName === 'focus') {
+                    priority = 'priority-high';
+                }
+                
+                sections.push({
+                    title: tagName.replace(/_/g, ' ').toUpperCase(),
+                    type: tagName,
+                    content: content,
+                    priority: priority
+                });
+            }
+            
+            // If no XML found, show raw sections
+            if (sections.length === 0) {
+                const lines = text.split('\n');
+                let currentSection = { title: 'Raw Prompt', content: '', type: 'raw', priority: 'priority-low' };
+                
+                lines.forEach(line => {
+                    if (line.startsWith('###')) {
+                        if (currentSection.content) {
+                            sections.push(currentSection);
+                        }
+                        currentSection = {
+                            title: line.replace(/###/g, '').trim(),
+                            content: '',
+                            type: 'markdown',
+                            priority: 'priority-low'
+                        };
+                    } else {
+                        currentSection.content += line + '\n';
+                    }
+                });
+                
+                if (currentSection.content) {
+                    sections.push(currentSection);
+                }
+            }
+            
+            return sections;
+        }
+
+        function updateStats(debugData, sizeData) {
+            // Context stats
+            const contextStats = document.getElementById('context-stats');
+            contextStats.innerHTML = `
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Scene:</span>
+                    <span class="font-mono">${debugData.scene || 'N/A'}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Detail Mode:</span>
+                    <span class="font-mono">${debugData.detail_mode || 'N/A'}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Total Lines:</span>
+                    <span class="font-mono">${sizeData.lines || 0}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">XML Sections:</span>
+                    <span class="font-mono">${sizeData.sections || 0}</span>
+                </div>
+            `;
+            
+            // Memory stats
+            const memoryStats = document.getElementById('memory-stats');
+            const threadStats = debugData.thread_stats || {};
+            memoryStats.innerHTML = `
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Total Memories:</span>
+                    <span class="font-mono">${debugData.memory_count || 0}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Active Threads:</span>
+                    <span class="font-mono">${threadStats.active_threads || 0}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Pending Threads:</span>
+                    <span class="font-mono">${threadStats.pending_threads || 0}</span>
+                </div>
+                <div class="flex justify-between">
+                    <span class="text-gray-400">Resolved Threads:</span>
+                    <span class="font-mono">${threadStats.resolved_threads || 0}</span>
+                </div>
+            `;
+        }
+
+        async function runTests() {
+            const container = document.getElementById('test-results');
+            container.innerHTML = '<div class="text-center py-8">Running tests...</div>';
+            
+            try {
+                const res = await fetch('/run_tests');
+                const results = await res.json();
+                
+                let html = `
+                    <div class="mb-4 p-4 bg-gray-700 rounded">
+                        <div class="grid grid-cols-4 gap-4 text-center">
+                            <div>
+                                <div class="text-2xl font-bold">${results.total}</div>
+                                <div class="text-xs text-gray-400">Total</div>
+                            </div>
+                            <div>
+                                <div class="text-2xl font-bold text-green-400">${results.passed}</div>
+                                <div class="text-xs text-gray-400">Passed</div>
+                            </div>
+                            <div>
+                                <div class="text-2xl font-bold text-red-400">${results.failed}</div>
+                                <div class="text-xs text-gray-400">Failed</div>
+                            </div>
+                            <div>
+                                <div class="text-2xl font-bold text-yellow-400">${results.warned}</div>
+                                <div class="text-xs text-gray-400">Warnings</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="space-y-2">
+                `;
+                
+                results.results.forEach(test => {
+                    const color = test.result.includes('PASS') ? 'green' : 
+                                 test.result.includes('FAIL') ? 'red' : 'yellow';
+                    html += `
+                        <div class="bg-gray-700 p-3 rounded">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="text-${color}-400 font-bold">${test.result}</span>
+                                <span class="font-medium">${test.name}</span>
+                            </div>
+                            <div class="text-sm text-gray-400">${test.details}</div>
+                        </div>
+                    `;
+                });
+                
+                html += '</div>';
+                container.innerHTML = html;
+                
+            } catch (error) {
+                container.innerHTML = `<div class="text-red-400">Error running tests: ${error.message}</div>`;
+            }
+        }
+
+        // Initial load
+        refreshData();
+        
+        // Auto-refresh every 5 seconds
+        setInterval(refreshData, 5000);
+    </script>
+
+    <style>
+        .tab-btn {
+            padding: 0.75rem 1.5rem;
+            background: transparent;
+            color: #9ca3af;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        .tab-btn:hover {
+            color: #e5e7eb;
+        }
+        .tab-btn.active {
+            color: #a855f7;
+            border-bottom-color: #a855f7;
+        }
+    </style>
+</body>
+</html>

@@ -7,6 +7,8 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold # type: i
 from config import ConversationState, FlowState, InputSource, GEMINI_API_KEY
 from context.context_store import ContextStore, EventItem
 from systems.decision_engine import Directive
+from typing import Dict, Any, List
+from config import SceneType, FlowState, ConversationState
 
 class PromptConstructor:
     """
@@ -322,3 +324,126 @@ class PromptConstructor:
         if clean_entry.startswith('"') and clean_entry.endswith('"'): clean_entry = clean_entry[1:-1]
         if clean_entry.startswith("'") and clean_entry.endswith("'"): clean_entry = clean_entry[1:-1]
         return clean_entry.strip()
+    
+class AdaptiveDetailController:
+    """
+    Controls how much detail to include in prompts based on context.
+    
+    PROBLEM: During high-intensity moments (combat, horror), bloated prompts
+    slow down response time and add noise.
+    
+    SOLUTION: Dynamically adjust detail levels based on scene/flow state.
+    """
+    
+    def __init__(self):
+        # Define detail presets
+        self.detail_modes = {
+            'minimal': {
+                'visual_frames': 1,      # Only latest frame
+                'memory_count': 2,       # Only top 2 memories
+                'log_lines': 5,          # Short event log
+                'narrative_history': 1,  # Just most recent story
+                'ancient_history': 0,    # Skip ancient context
+                'max_visual_chars': 80,  # Truncate descriptions
+            },
+            'normal': {
+                'visual_frames': 2,
+                'memory_count': 3,
+                'log_lines': 10,
+                'narrative_history': 3,
+                'ancient_history': 1,
+                'max_visual_chars': 150,
+            },
+            'detailed': {
+                'visual_frames': 3,
+                'memory_count': 5,
+                'log_lines': 15,
+                'narrative_history': 5,
+                'ancient_history': 2,
+                'max_visual_chars': 250,
+            }
+        }
+    
+    def select_detail_mode(self, store) -> str:
+        """
+        Intelligently choose detail level based on current state.
+        
+        Returns: 'minimal', 'normal', or 'detailed'
+        """
+        scene = store.current_scene
+        flow = store.current_flow
+        conv_state = store.current_conversation_state
+        
+        # === MINIMAL (Fast response needed) ===
+        
+        # High-intensity scenes need quick reactions, not deep context
+        if scene in [SceneType.COMBAT_HIGH, SceneType.HORROR_TENSION]:
+            print(f"📊 [Detail] MINIMAL mode - high-intensity scene ({scene.name})")
+            return 'minimal'
+        
+        # User is dominating conversation - keep responses tight
+        if flow == FlowState.DOMINATED:
+            print(f"📊 [Detail] MINIMAL mode - user dominating")
+            return 'minimal'
+        
+        # Staccato flow = rapid-fire chat, keep it snappy
+        if flow == FlowState.STACCATO:
+            print(f"📊 [Detail] MINIMAL mode - rapid-fire flow")
+            return 'minimal'
+        
+        # === DETAILED (Opportunity for rich response) ===
+        
+        # Dead air = perfect time for thoughtful, detailed responses
+        if flow == FlowState.DEAD_AIR:
+            print(f"📊 [Detail] DETAILED mode - dead air opportunity")
+            return 'detailed'
+        
+        # Storytelling mode = user wants depth
+        if conv_state == ConversationState.STORYTELLING:
+            print(f"📊 [Detail] DETAILED mode - storytelling context")
+            return 'detailed'
+        
+        # Chill scenes = room for detail
+        if scene in [SceneType.CHILL_CHATTING, SceneType.EXPLORATION]:
+            print(f"📊 [Detail] DETAILED mode - chill scene ({scene.name})")
+            return 'detailed'
+        
+        # === NORMAL (Default) ===
+        print(f"📊 [Detail] NORMAL mode - balanced context")
+        return 'normal'
+    
+    def get_limits(self, mode: str) -> Dict[str, Any]:
+        """Get the limit configuration for a given mode."""
+        return self.detail_modes.get(mode, self.detail_modes['normal'])
+    
+    def apply_limits_to_visual(self, visual_events: List, mode: str) -> List:
+        """Apply frame limit to visual events."""
+        limits = self.get_limits(mode)
+        return visual_events[-limits['visual_frames']:]
+    
+    def apply_limits_to_memories(self, memories: List, mode: str) -> List:
+        """Apply memory count limit."""
+        limits = self.get_limits(mode)
+        return memories[:limits['memory_count']]
+    
+    def apply_limits_to_narrative(self, narrative_log: List, mode: str) -> List:
+        """Apply narrative history limit."""
+        limits = self.get_limits(mode)
+        count = limits['narrative_history']
+        return narrative_log[-count:] if count > 0 else []
+    
+    def apply_limits_to_ancient(self, ancient_log: List, mode: str) -> List:
+        """Apply ancient history limit."""
+        limits = self.get_limits(mode)
+        count = limits['ancient_history']
+        return ancient_log[-count:] if count > 0 else []
+    
+    def truncate_visual_text(self, text: str, mode: str) -> str:
+        """Truncate visual descriptions based on mode."""
+        limits = self.get_limits(mode)
+        max_chars = limits['max_visual_chars']
+        
+        if len(text) <= max_chars:
+            return text
+        
+        return text[:max_chars-3] + "..."

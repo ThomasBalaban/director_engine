@@ -8,6 +8,9 @@ from scoring import calculate_event_score, EventScore
 from context.context_store import EventItem
 from config import InputSource
 import shared 
+from typing import Dict, Any
+from config import SceneType, UserIntent, ConversationState, InputSource
+
 
 # --- AI CONTEXT INFERENCE STATE ---
 last_context_inference_time = 0
@@ -170,6 +173,155 @@ async def reflex_ticker():
         await asyncio.sleep(1.0)
 
 
+def build_smart_memory_query(store, summary_data: Dict[str, Any]) -> str:
+    """
+    Build a SMART query for semantic memory retrieval.
+    Adapts based on:
+    - Current scene type (different memory priorities)
+    - User intent (what kind of memories matter now)  
+    - Conversation state (support vs entertainment)
+    
+    IMPROVEMENTS:
+    - Scene-aware keyword injection
+    - Intent-driven memory focus
+    - Reduced noise from irrelevant context
+    - Priority weighting for different contexts
+    """
+    query_parts = []
+    priority_keywords = []
+    
+    # === SCENE-AWARE MEMORY FOCUS ===
+    scene = store.current_scene
+    
+    if scene == SceneType.HORROR_TENSION:
+        # Prioritize past scary moments, reactions to fear
+        priority_keywords.extend(["scared", "tension", "jumpscare", "afraid", "creepy"])
+        print(f"🧠 [Memory Query] Horror scene - prioritizing fear-related memories")
+    
+    elif scene == SceneType.COMBAT_HIGH:
+        # Prioritize victories, defeats, skill patterns
+        priority_keywords.extend(["won", "died", "combat", "fight", "boss", "victory", "defeat"])
+        print(f"🧠 [Memory Query] Combat scene - prioritizing performance memories")
+    
+    elif scene == SceneType.COMEDY_MOMENT:
+        # Prioritize past funny moments, memes
+        priority_keywords.extend(["funny", "laugh", "joke", "meme", "chat said"])
+        print(f"🧠 [Memory Query] Comedy scene - prioritizing humor memories")
+    
+    elif scene == SceneType.EXPLORATION:
+        # Prioritize discoveries, locations
+        priority_keywords.extend(["found", "discovered", "location", "area", "new"])
+        print(f"🧠 [Memory Query] Exploration scene - prioritizing discovery memories")
+    
+    elif scene == SceneType.MENUING:
+        # Prioritize past decisions, choices made
+        priority_keywords.extend(["chose", "selected", "menu", "inventory", "equipped"])
+    
+    # === INTENT-AWARE ADDITIONS ===
+    intent = store.current_intent
+    
+    if intent == UserIntent.VALIDATION:
+        # Pull memories of past praise/criticism
+        priority_keywords.extend(["good job", "well done", "nice", "amazing", "great"])
+        print(f"🧠 [Memory Query] User seeking validation - adding praise memories")
+    
+    elif intent == UserIntent.HELP_SEEKING:
+        # Pull memories of solutions, tips, strategies
+        priority_keywords.extend(["how to", "solution", "fix", "try", "strategy", "worked"])
+        print(f"🧠 [Memory Query] User seeking help - adding solution memories")
+    
+    elif intent == UserIntent.PROVOKING:
+        # Pull memories of past roasts, banter
+        priority_keywords.extend(["roasted", "skill issue", "trash", "bad", "terrible"])
+        print(f"🧠 [Memory Query] User provoking - adding banter memories")
+    
+    elif intent == UserIntent.INFO_SEEKING:
+        # Pull memories with facts, information
+        priority_keywords.extend(["learned", "discovered", "found out", "fact"])
+    
+    # === CONVERSATION STATE CONTEXT ===
+    conv_state = store.current_conversation_state
+    
+    if conv_state == ConversationState.FRUSTRATED:
+        # Pull memories of past frustrations to validate/empathize
+        priority_keywords.extend(["frustrated", "angry", "rage", "annoyed", "difficult"])
+        print(f"🧠 [Memory Query] User frustrated - adding empathy context")
+    
+    elif conv_state == ConversationState.CELEBRATORY:
+        # Pull memories of past wins
+        priority_keywords.extend(["celebrate", "won", "success", "finally", "beat"])
+        print(f"🧠 [Memory Query] Celebration mode - adding victory memories")
+    
+    elif conv_state == ConversationState.STORYTELLING:
+        # Pull related narrative memories
+        priority_keywords.extend(["story", "told", "happened", "remember when"])
+    
+    # Add priority keywords first (weighted higher in semantic search)
+    if priority_keywords:
+        # Deduplicate and take top 5
+        unique_keywords = list(dict.fromkeys(priority_keywords))[:5]
+        query_parts.append(" ".join(unique_keywords))
+    
+    # === IMMEDIATE CONTEXT (Always include) ===
+    layers = store.get_all_events_for_summary()
+    
+    # Recent speech - what user JUST said (most important)
+    recent_speech = [
+        e.text for e in layers['immediate'] + layers['recent'][:2]
+        if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]
+    ][-2:]  # Last 2 only (more focused than 3)
+    
+    if recent_speech:
+        query_parts.extend(recent_speech)
+        print(f"🧠 [Memory Query] Including recent speech: {len(recent_speech)} items")
+    
+    # Current visual context (if relevant to scene)
+    # Skip visuals during menuing/downtime to reduce noise
+    if scene not in [SceneType.TECHNICAL_DOWNTIME, SceneType.MENUING]:
+        recent_visual = [
+            e.text for e in layers['immediate']
+            if e.source == InputSource.VISUAL_CHANGE
+        ][-1:]  # Only most recent
+        
+        if recent_visual:
+            # Extract just key nouns/entities (first 60 chars to avoid bloat)
+            visual_snippet = recent_visual[0][:60]
+            query_parts.append(visual_snippet)
+    
+    # === TOPICS & ENTITIES (Lower priority) ===
+    # Only add if we don't have enough context yet
+    if len(query_parts) < 3:
+        topics = summary_data.get('topics', [])
+        if topics:
+            query_parts.extend(topics[:2])
+        
+        entities = summary_data.get('entities', [])
+        if entities:
+            query_parts.extend(entities[:2])
+    
+    # === FALLBACK ===
+    if not query_parts:
+        # Absolute fallback - use summary
+        summary = summary_data.get('summary', '')
+        if summary:
+            query_parts.append(summary[:100])
+        else:
+            # Last resort - generic query
+            query_parts.append("recent events gameplay")
+    
+    # Combine into query string
+    query = " ".join(query_parts)
+    
+    # Limit length to prevent token bloat
+    if len(query) > 500:
+        query = query[:500]
+    
+    # Debug output
+    print(f"🧠 [Memory Query] Final query ({len(query)} chars): '{query[:80]}...'")
+    
+    return query
+
+
 def _build_memory_query(store, summary_data: Dict[str, Any]) -> str:
     """
     Build a rich query for semantic memory retrieval.
@@ -242,7 +394,7 @@ async def summary_ticker():
             summary_data = shared.store.get_summary_data()
             
             # --- IMPROVED: Build a richer query for memory retrieval ---
-            current_query = _build_memory_query(shared.store, summary_data)
+            current_query = build_smart_memory_query(shared.store, summary_data)
 
             # --- DEBUG: Log memory retrieval ---
             print(f"🧠 [Memory] Query: '{current_query[:60]}...' " if len(current_query) > 60 else f"🧠 [Memory] Query: '{current_query}'")
