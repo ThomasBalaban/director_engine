@@ -72,6 +72,17 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
         profile = shared.profile_manager.get_profile(username)
         shared.store.set_active_user(profile)
 
+    # Track conversation threads
+    if source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
+        detected_topic = metadata.get('topic')
+        importance = metadata.get('importance', 0.5)
+        
+        shared.store.thread_manager.track_user_statement(
+            text=text,
+            detected_topic=detected_topic,
+            importance=importance
+        )
+
     # 3. Handle Bot Self-Reply
     if source == config.InputSource.BOT_TWITCH_REPLY:
         zero_score = EventScore()

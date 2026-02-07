@@ -11,6 +11,7 @@ from config import (
 )
 from scoring import EventScore
 import config
+from services.conversation_threading import ConversationThreadManager  # ✅ ADD THIS HERE
 
 @dataclass
 class EventItem:
@@ -55,6 +56,7 @@ class ContextStore:
         self.ancient_history_log: List[str] = [] 
         
         self.all_memories: List[EventItem] = [] 
+        self.thread_manager = ConversationThreadManager()
         self.lock = threading.Lock()
         
         self.pending_speech_event: Optional[EventItem] = None

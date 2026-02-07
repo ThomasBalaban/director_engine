@@ -6,6 +6,7 @@ import google.generativeai as genai # type: ignore
 from google.generativeai.types import HarmCategory, HarmBlockThreshold # type: ignore
 from config import ConversationState, FlowState, InputSource, GEMINI_API_KEY
 from context.context_store import ContextStore, EventItem
+from services.structured_prompt_formatter import StructuredPromptFormatter
 from systems.decision_engine import Directive
 from typing import Dict, Any, List
 from config import SceneType, FlowState, ConversationState
@@ -39,17 +40,20 @@ class PromptConstructor:
                 print(f"❌ [PromptConstructor] Failed to init Gemini: {e}")
         else:
             print("⚠️ [PromptConstructor] No API Key. Visual summarization will use fallback.")
+        
+        self.detail_controller = AdaptiveDetailController()
+        self.formatter = StructuredPromptFormatter()
+        print("✅ [PromptConstructor] Controllers initialized")
 
     async def construct_context_block(self, 
-                              store: ContextStore, 
-                              directive: Directive, 
-                              memories: List[EventItem]) -> str:
-        """
-        Builds the dynamic context block. ASYNC to allow for Gemini calls.
-        """
-        import shared  # Import here to avoid circular imports
+                          store: ContextStore, 
+                          directive: Directive, 
+                          memories: List[EventItem]) -> str:
+        import shared
         
-        # --- 1. GATHER DATA ---
+        # [NEW] Determine detail level
+        detail_mode = self.detail_controller.select_detail_mode(store)
+        limits = self.detail_controller.get_limits(detail_mode)
         
         # Get raw event layers
         layers = store.get_all_events_for_summary()
@@ -61,73 +65,45 @@ class PromptConstructor:
         ]
         active_events.sort(key=lambda x: x.timestamp)
         
-        # Check if the user is actively talking (Used for Reordering)
+        # [NEW] Apply detail limits to visuals
+        visual_events = [e for e in active_events if e.source == InputSource.VISUAL_CHANGE]
+        visual_events = self.detail_controller.apply_limits_to_visual(visual_events, detail_mode)
+        
+        # [NEW] Apply limits to memories
+        memories = self.detail_controller.apply_limits_to_memories(memories, detail_mode)
+        
+        # Check if user is speaking
         user_is_speaking = any(e.source == InputSource.DIRECT_MICROPHONE for e in active_events)
-
-        # --- 2. PREPARE SECTIONS ---
         
-        # A. Visuals (Scene description) - NOW ASYNC
-        visual_str = await self._format_visual_summary(active_events)
-        
-        # B. Audio/Chat Log (The dialogue history)
+        # Build formatted sections (using ASYNC visual summary)
+        visual_str = await self._format_visual_summary(visual_events)
         log_str = self._format_event_log(active_events)
         
-        # C. Static Context (Manual notes)
-        manual_ctx = shared.get_manual_context()
-        current_streamer = shared.get_current_streamer()
-        operator_str = ""
-        if manual_ctx or current_streamer:
-            operator_str = "### OPERATOR NOTES"
-            if current_streamer: operator_str += f"\nCurrently watching: {current_streamer}"
-            if manual_ctx: operator_str += f"\nContext: {manual_ctx}"
-
-        # D. User Profile
-        user_ctx = ""
-        if store.active_user_profile:
-            user_ctx = self._format_user_context(store.active_user_profile)
-
-        # E. Engine State
-        scene_ctx = self._format_scene_context(store)
-        dir_ctx = self._format_directive(directive)
-        mem_ctx = self._format_memories(memories, store.narrative_log, store.ancient_history_log)
-
-        # --- 3. DYNAMIC ASSEMBLY (The "Director Brain") ---
+        # [NEW] Get thread context
+        thread_context = store.thread_manager.get_thread_context_for_prompt()
         
-        parts = []
+        # [NEW] Use structured formatter
+        prompt = self.formatter.format_full_prompt(
+            directive=directive,
+            store=store,
+            events=active_events,
+            memories=memories,
+            visual_summary=visual_str,
+            conversation_log=log_str,
+            user_is_speaking=user_is_speaking,
+            manual_context=shared.get_manual_context(),
+            current_streamer=shared.get_current_streamer()
+        )
         
-        # Always start with Operator Notes if they exist
-        if operator_str: parts.append(operator_str)
-
-        if user_is_speaking:
-            # === MODE A: CONVERSATION FOCUSED ===
-            # If user is talking, we prioritize listening to them.
-            parts.append("### FOCUS: USER INTERACTION (Prioritize responding to this)")
-            if user_ctx: parts.append(user_ctx)
-            parts.append(log_str)
-            parts.append("### BACKGROUND CONTEXT (Game State)")
-            if scene_ctx: parts.append(scene_ctx)
-            parts.append(visual_str)
-        else:
-            # === MODE B: COMMENTARY FOCUSED ===
-            # If user is silent, we prioritize the stream/game.
-            parts.append("### CURRENT GAME STATE (Comment on this)")
-            if scene_ctx: parts.append(scene_ctx)
-            parts.append(visual_str)
-            parts.append(log_str)
-            if user_ctx: parts.append(user_ctx)
-
-        # Directive and Memories always go near the end for instruction adherence
-        if mem_ctx: parts.append(mem_ctx)
-        if dir_ctx: parts.append(dir_ctx)
-
-        # Fallback if empty
-        if not parts:
-            return "### CURRENT SITUATION\nJust started up. Waiting for events to occur."
+        # [NEW] Inject thread context if present
+        if thread_context:
+            # Insert before the last section (memories usually)
+            parts = prompt.split('\n\n')
+            parts.insert(-1, thread_context)
+            prompt = '\n\n'.join(parts)
         
-        result = "\n\n".join(parts)
-        # print(f"📋 [PromptConstructor] Built context block: {len(result)} chars (User Active: {user_is_speaking})")
-        return result
-
+        return prompt
+    
     async def _format_visual_summary(self, events: List[EventItem]) -> str:
         """
         Extracts visual events and summarizes them using Gemini ASYNC or a smart fallback.

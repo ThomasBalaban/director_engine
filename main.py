@@ -89,6 +89,60 @@ async def get_breadcrumbs(count: int = 3):
         print(f"❌ [/breadcrumbs] Error: {type(e).__name__}: {e}")
         traceback.print_exc()
         return {"formatted_context": f"[Director Error: {str(e)}]"}
+    
+@app.get("/thread_stats")
+async def get_thread_stats():
+    """Debug endpoint for conversation threading"""
+    return shared.store.thread_manager.get_stats()
+
+@app.get("/prompt_debug")
+async def get_prompt_debug():
+    """See the actual prompt being sent to Nami"""
+    summary_data = shared.store.get_summary_data()
+    current_query = summary_data.get('summary', "") or " ".join(summary_data.get('topics', []))
+    smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
+    
+    directive = summary_data.get('directive')
+    formatted_context = await shared.prompt_constructor.construct_context_block(
+        shared.store, directive, smart_memories[:3]
+    )
+    
+    detail_mode = shared.prompt_constructor.detail_controller.select_detail_mode(shared.store)
+    
+    return {
+        "formatted_context": formatted_context,
+        "detail_mode": detail_mode,
+        "thread_stats": shared.store.thread_manager.get_stats(),
+        "scene": shared.store.current_scene.name,
+        "memory_count": len(shared.store.all_memories)
+    }
+
+@app.get("/prompt_size")
+async def get_prompt_size():
+    """Monitor token usage"""
+    summary_data = shared.store.get_summary_data()
+    current_query = summary_data.get('summary', "")
+    smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
+    
+    directive = summary_data.get('directive')
+    context = await shared.prompt_constructor.construct_context_block(
+        shared.store, directive, smart_memories[:3]
+    )
+    
+    return {
+        "char_count": len(context),
+        "estimated_tokens": len(context) // 4,
+        "lines": context.count('\n'),
+        "sections": context.count('<')
+    }
+
+@app.get("/run_tests")
+async def run_quality_tests():
+    """Run automated prompt quality tests"""
+    from test_framework import PromptQualityTester
+    tester = PromptQualityTester(shared.store, shared.prompt_constructor)
+    report = await tester.run_all_tests()
+    return report
 
 @app.get("/speech_state")
 async def get_speech_state():
@@ -132,6 +186,16 @@ async def ingest_event(sid, payload: dict):
 @shared.sio.on("bot_reply")
 async def receive_bot_reply(sid, payload: dict):
     try:
+        reply_text = payload.get('reply', '')
+        active_thread = shared.store.thread_manager.get_active_thread()
+
+        if active_thread:
+            resolves = "?" not in reply_text
+            shared.store.thread_manager.track_nami_response(
+                text=reply_text,
+                resolves_thread=resolves
+            )
+        
         shared.emit_bot_reply(
             payload.get('reply', ''), 
             payload.get('prompt', ''), 
