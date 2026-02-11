@@ -56,21 +56,28 @@ def _handle_context_inference_result(result: Dict[str, str]):
 async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
     
     # =====================================================
-    # INTERRUPT CHECK: If user directly addresses Nami,
-    # interrupt her IMMEDIATELY before any processing
+    # INTERRUPT CHECK: Only TWO cases can interrupt Nami:
+    #   1. Mic input (DIRECT_MICROPHONE) - user speaking directly
+    #   2. "peepingotter" says "nami" in Twitch chat
+    # All other sources are normal (no interrupt capability).
     # =====================================================
-    is_direct_address = source in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.TWITCH_MENTION]
+    is_direct_address = source == config.InputSource.DIRECT_MICROPHONE
+    
+    if source == config.InputSource.TWITCH_MENTION:
+        mention_username = (username or metadata.get('username', '')).lower()
+        mention_text = text.lower()
+        if mention_username == 'peepingotter' and 'nami' in mention_text:
+            is_direct_address = True
     
     if is_direct_address:
         shared.clear_user_awaiting()
         
-        # INTERRUPT: If Nami is speaking, cut her off immediately
+        # INTERRUPT: If Nami is speaking, cut her off immediately (ONE-SHOT)
         if shared.is_nami_speaking():
             interrupt_reason = f"direct_{'mic' if source == config.InputSource.DIRECT_MICROPHONE else 'mention'}"
             was_interrupted = shared.interrupt_nami(reason=interrupt_reason)
             if was_interrupted:
                 print(f"🛑 [CoreLogic] Nami interrupted for direct address: {text[:50]}...")
-                # Give a tiny delay for the interrupt signal to propagate
                 await asyncio.sleep(0.05)
     
     # 1. UI Emit

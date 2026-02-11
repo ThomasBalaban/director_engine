@@ -132,20 +132,33 @@ def is_nami_speaking() -> bool:
     
     return True
 
-# --- NEW: INTERRUPT SYSTEM ---
+# --- INTERRUPT SYSTEM ---
 def interrupt_nami(reason: str = "direct_mention") -> bool:
     """
     Force-interrupt Nami's current speech for high-priority direct interactions.
     This clears the speaking lock AND emits an interrupt signal to Nami's TTS.
+    
+    ONE-SHOT DESIGN:
+    - Clears nami_is_speaking so the interrupt interjection can be sent
+    - KEEPS awaiting_user_response = True so the reflex ticker and speech
+      dispatcher stay suppressed after the interrupt reply goes out
+    - Does NOT reset speech_dispatcher cooldowns
+    
+    This means: interrupt fires -> Nami replies once -> then she goes back to
+    being suppressed until the user speaks again naturally.
     
     Returns True if Nami was actually speaking (and got interrupted).
     """
     global nami_is_speaking, awaiting_user_response, last_interrupt_time, interrupt_count
     was_speaking = nami_is_speaking
     nami_is_speaking = False
-    awaiting_user_response = False
     last_interrupt_time = time.time()
     interrupt_count += 1
+    
+    # KEEP awaiting_user_response = True so the reflex ticker and speech
+    # dispatcher stay suppressed after the interrupt reply goes out.
+    # This prevents Nami from "routinely interrupting herself."
+    awaiting_user_response = True
     
     if was_speaking:
         print(f"🛑 [INTERRUPT] Nami interrupted! Reason: {reason}")
@@ -163,9 +176,11 @@ def interrupt_nami(reason: str = "direct_mention") -> bool:
     else:
         print(f"🛑 [INTERRUPT] Interrupt requested but Nami wasn't speaking (reason: {reason})")
     
-    # Reset the speech dispatcher's cooldown so the reply goes through immediately
-    speech_dispatcher.last_speech_time = 0
-    speech_dispatcher.last_user_response_time = 0
+    # DO NOT reset speech_dispatcher cooldowns.
+    # The interrupt interjection bypasses the speech dispatcher entirely
+    # (sent directly via trigger_nami_interjection). After Nami replies,
+    # awaiting_user_response=True keeps idle/proactive speech suppressed
+    # until the user speaks again naturally.
     
     return was_speaking
 
