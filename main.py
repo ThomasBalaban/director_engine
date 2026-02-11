@@ -18,6 +18,7 @@ import config
 from systems import process_manager
 import services.llm_analyst as llm_analyst
 from services.sensor_bridge import SensorBridge
+from scoring import EventScore
 import shared
 import core_logic
 
@@ -164,6 +165,74 @@ async def get_lock_states():
         "streamer_locked": shared.is_streamer_locked(),
         "context_locked": shared.is_context_locked()
     }
+
+# =====================================================
+# INTERRUPT SYSTEM ENDPOINTS
+# =====================================================
+
+@app.get("/interrupt_stats")
+async def get_interrupt_stats():
+    """Debug endpoint for interrupt system status"""
+    return shared.get_interrupt_stats()
+
+@app.post("/simulate_interrupt")
+async def simulate_interrupt(payload: dict = {}):
+    """
+    Test endpoint: Simulate a direct mention to test the interrupt pipeline.
+    
+    Body:
+        source: "mic" | "twitch" (default: "mic")
+        text: The message text (default: "Hey Nami, what do you think?")
+        username: Twitch username (default: "peepingotter")
+    """
+    source_str = payload.get('source', 'mic')
+    text = payload.get('text', 'Hey Nami, what do you think?')
+    username = payload.get('username', 'peepingotter')
+    
+    if source_str == 'twitch':
+        source = config.InputSource.TWITCH_MENTION
+    else:
+        source = config.InputSource.DIRECT_MICROPHONE
+    
+    # Track state before
+    was_speaking = shared.is_nami_speaking()
+    was_awaiting = shared.awaiting_user_response
+    
+    # Process as real event
+    await core_logic.process_engine_event(
+        source=source,
+        text=text,
+        metadata={'username': username, 'simulated': True},
+        username=username
+    )
+    
+    return {
+        "status": "ok",
+        "simulated_source": source.name,
+        "text": text,
+        "was_speaking_before": was_speaking,
+        "was_awaiting_before": was_awaiting,
+        "is_speaking_after": shared.is_nami_speaking(),
+        "is_awaiting_after": shared.awaiting_user_response,
+        "interrupted": was_speaking and not shared.is_nami_speaking(),
+        "interrupt_stats": shared.get_interrupt_stats()
+    }
+
+@app.post("/simulate_speaking")
+async def simulate_speaking(payload: dict = {}):
+    """Test helper: Set Nami to 'speaking' state for testing interrupts."""
+    shared.set_nami_speaking(True, source='SIMULATED_TEST')
+    return {
+        "status": "ok",
+        "is_speaking": shared.is_nami_speaking(),
+        "note": f"Nami is now 'speaking'. Will timeout after {shared.SPEECH_TIMEOUT}s or on interrupt."
+    }
+
+@app.post("/simulate_stop_speaking")
+async def simulate_stop_speaking():
+    """Test helper: Clear Nami's speaking state."""
+    shared.set_nami_speaking(False)
+    return {"status": "ok", "is_speaking": shared.is_nami_speaking()}
 
 # --- IMPORTANT: Mount static files AFTER all API routes ---
 app.mount("/static", StaticFiles(directory=ui_path, html=True), name="static")

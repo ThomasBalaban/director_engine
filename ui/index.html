@@ -43,6 +43,10 @@
             onclick="openDebugDrawer('run_tests')">
             🧪
         </button>
+        <button class="debug-nav-btn" data-drawer="interrupt_test" data-tooltip="Interrupt Test"
+            onclick="openDebugDrawer('interrupt_test')">
+            🛑
+        </button>
     </nav>
     <div class="max-w-screen-2xl mx-auto w-full flex flex-col flex-1 min-h-0">
         <header class="mb-4 flex-shrink-0">
@@ -279,7 +283,7 @@
         <div id="debug-drawer-content" class="h-full flex flex-col"></div>
     </aside>
 
-    <script src="script.js?v=5"></script>
+    <script src="script.js?v=6"></script>
     <script src="drawer_controller.js"></script>
 </body>
 

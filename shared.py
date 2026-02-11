@@ -85,6 +85,10 @@ SPEECH_TIMEOUT: float = 60.0
 last_speech_source: Optional[str] = None
 awaiting_user_response: bool = False
 
+# --- INTERRUPT TRACKING ---
+last_interrupt_time: float = 0.0
+interrupt_count: int = 0
+
 def set_nami_speaking(is_speaking: bool, source: str = None):
     """Thread-safe setter for speech state."""
     global nami_is_speaking, speech_started_time, last_speech_source, awaiting_user_response
@@ -127,6 +131,54 @@ def is_nami_speaking() -> bool:
         return False
     
     return True
+
+# --- NEW: INTERRUPT SYSTEM ---
+def interrupt_nami(reason: str = "direct_mention") -> bool:
+    """
+    Force-interrupt Nami's current speech for high-priority direct interactions.
+    This clears the speaking lock AND emits an interrupt signal to Nami's TTS.
+    
+    Returns True if Nami was actually speaking (and got interrupted).
+    """
+    global nami_is_speaking, awaiting_user_response, last_interrupt_time, interrupt_count
+    was_speaking = nami_is_speaking
+    nami_is_speaking = False
+    awaiting_user_response = False
+    last_interrupt_time = time.time()
+    interrupt_count += 1
+    
+    if was_speaking:
+        print(f"🛑 [INTERRUPT] Nami interrupted! Reason: {reason}")
+        # Signal to Nami's TTS to stop immediately
+        _emit_threadsafe('interrupt_speech', {
+            'reason': reason,
+            'timestamp': time.time()
+        })
+        # Also signal to UI for debugging
+        _emit_threadsafe('nami_interrupted', {
+            'reason': reason,
+            'timestamp': time.time(),
+            'interrupt_count': interrupt_count
+        })
+    else:
+        print(f"🛑 [INTERRUPT] Interrupt requested but Nami wasn't speaking (reason: {reason})")
+    
+    # Reset the speech dispatcher's cooldown so the reply goes through immediately
+    speech_dispatcher.last_speech_time = 0
+    speech_dispatcher.last_user_response_time = 0
+    
+    return was_speaking
+
+def get_interrupt_stats() -> Dict[str, Any]:
+    """Get interrupt statistics for debugging."""
+    return {
+        "total_interrupts": interrupt_count,
+        "last_interrupt_time": last_interrupt_time,
+        "seconds_since_last": round(time.time() - last_interrupt_time, 1) if last_interrupt_time else None,
+        "nami_currently_speaking": is_nami_speaking(),
+        "awaiting_user_response": awaiting_user_response,
+        "speech_source": last_speech_source
+    }
 
 # --- ENGINE INITIALIZATION ---
 store = ContextStore()

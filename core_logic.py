@@ -54,8 +54,24 @@ def _handle_context_inference_result(result: Dict[str, str]):
 
 # --- EVENT PROCESSOR ---
 async def process_engine_event(source: config.InputSource, text: str, metadata: Dict[str, Any] = {}, username: Optional[str] = None):
-    if source in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.TWITCH_MENTION]:
+    
+    # =====================================================
+    # INTERRUPT CHECK: If user directly addresses Nami,
+    # interrupt her IMMEDIATELY before any processing
+    # =====================================================
+    is_direct_address = source in [config.InputSource.DIRECT_MICROPHONE, config.InputSource.TWITCH_MENTION]
+    
+    if is_direct_address:
         shared.clear_user_awaiting()
+        
+        # INTERRUPT: If Nami is speaking, cut her off immediately
+        if shared.is_nami_speaking():
+            interrupt_reason = f"direct_{'mic' if source == config.InputSource.DIRECT_MICROPHONE else 'mention'}"
+            was_interrupted = shared.interrupt_nami(reason=interrupt_reason)
+            if was_interrupted:
+                print(f"🛑 [CoreLogic] Nami interrupted for direct address: {text[:50]}...")
+                # Give a tiny delay for the interrupt signal to propagate
+                await asyncio.sleep(0.05)
     
     # 1. UI Emit
     if source == config.InputSource.VISUAL_CHANGE:
@@ -94,6 +110,15 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
     
     # 4. Scoring & Storage
     heuristic_score: EventScore = calculate_event_score(source, metadata, config.SOURCE_WEIGHTS)
+    
+    # BOOST: Direct addresses get maximum scores to ensure they trigger interjection
+    if is_direct_address:
+        heuristic_score.interestingness = max(heuristic_score.interestingness, 0.95)
+        heuristic_score.urgency = max(heuristic_score.urgency, 0.95)
+        heuristic_score.conversational_value = max(heuristic_score.conversational_value, 0.95)
+        metadata['is_direct_address'] = True
+        metadata['interrupt_priority'] = True
+    
     event = shared.store.add_event(source, text, metadata, heuristic_score)
     shared.emit_event_scored(event)
     
@@ -120,17 +145,26 @@ async def process_engine_event(source: config.InputSource, text: str, metadata: 
 
     # 7. Attention & Analysis
     if not bundle_event_created:
-        attended_event = shared.behavior_engine.direct_attention(shared.store, [event])
-        if attended_event:
-            if heuristic_score.interestingness >= config.OLLAMA_TRIGGER_THRESHOLD:
-                asyncio.create_task(llm_analyst.analyze_and_update_event(
-                    event, shared.store, shared.profile_manager, handle_analysis_complete
-                ))
-            elif heuristic_score.urgency >= shared.adaptive_ctrl.current_threshold:
-                 if shared.energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
-                     asyncio.create_task(llm_analyst.analyze_and_update_event(
+        # DIRECT ADDRESSES: Always analyze immediately, skip attention gating
+        if is_direct_address:
+            print(f"🎯 [CoreLogic] Direct address - fast-tracking to analysis: {text[:50]}...")
+            asyncio.create_task(llm_analyst.analyze_and_update_event(
+                event, shared.store, shared.profile_manager, handle_analysis_complete
+            ))
+            # Also trigger immediate interjection (don't wait for LLM analysis)
+            await llm_analyst.trigger_nami_interjection(event, 1.0, is_interrupt=True)
+        else:
+            attended_event = shared.behavior_engine.direct_attention(shared.store, [event])
+            if attended_event:
+                if heuristic_score.interestingness >= config.OLLAMA_TRIGGER_THRESHOLD:
+                    asyncio.create_task(llm_analyst.analyze_and_update_event(
                         event, shared.store, shared.profile_manager, handle_analysis_complete
                     ))
+                elif heuristic_score.urgency >= shared.adaptive_ctrl.current_threshold:
+                     if shared.energy_system.can_afford(config.ENERGY_COST_INTERJECTION):
+                         asyncio.create_task(llm_analyst.analyze_and_update_event(
+                            event, shared.store, shared.profile_manager, handle_analysis_complete
+                        ))
 
 def handle_analysis_complete(event: EventItem):
     shared.emit_event_scored(event)

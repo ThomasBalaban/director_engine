@@ -102,7 +102,8 @@ function stopAllDrawerRefreshes() {
     const stopFunctions = [
         'stopThreadStatsRefresh',
         'stopPromptDebugRefresh', 
-        'stopRunTestsRefresh'
+        'stopRunTestsRefresh',
+        'stopInterrupt_testRefresh'
     ];
     
     stopFunctions.forEach(fnName => {

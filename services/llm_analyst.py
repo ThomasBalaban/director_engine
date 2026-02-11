@@ -310,7 +310,8 @@ async def analyze_and_update_event(
                 print(f"💾 [Analyst] Promoted to memory: {summary_str[:50] if summary_str else event.text[:50]}...")
 
             if new_score.urgency >= INTERJECTION_THRESHOLD:
-                await trigger_nami_interjection(event, new_score.urgency)
+                is_interrupt = event.metadata.get('interrupt_priority', False)
+                await trigger_nami_interjection(event, new_score.urgency, is_interrupt=is_interrupt)
 
         if new_sentiment:
              store.update_event_metadata(event.id, {"sentiment": new_sentiment})
@@ -329,15 +330,31 @@ async def analyze_and_update_event(
     except Exception as e:
         print(f"[Analyst] ERROR: Ollama call failed for event {event.id}: {e}")
 
-async def trigger_nami_interjection(event: EventItem, urgency_score: float) -> bool:
+async def trigger_nami_interjection(event: EventItem, urgency_score: float, is_interrupt: bool = False) -> bool:
+    """
+    Send an interjection to Nami.
+    
+    If is_interrupt=True, this is a direct address that should interrupt 
+    whatever Nami is currently saying.
+    """
     global http_client
     if not http_client: return False
     try:
         interject_payload = {
             "content": event.text,
-            "priority": 1.0 - urgency_score,
-            "source_info": {"source": f"DIRECTOR_{event.source.name}", "use_tts": True, **event.metadata}
+            "priority": 0.0 if is_interrupt else (1.0 - urgency_score),  # 0.0 = highest priority
+            "source_info": {
+                "source": f"DIRECTOR_{event.source.name}", 
+                "use_tts": True,
+                "is_interrupt": is_interrupt,  # NEW: Signal to Nami that this interrupts
+                "is_direct_address": event.metadata.get('is_direct_address', False),
+                **{k: v for k, v in event.metadata.items() if k not in ['is_direct_address']}
+            }
         }
+        
+        if is_interrupt:
+            print(f"🛑 [Analyst] Sending INTERRUPT interjection: {event.text[:50]}...")
+        
         response = await http_client.post(NAMI_INTERJECT_URL, json=interject_payload, timeout=2.0)
         return response.status_code == 200
     except Exception as e:

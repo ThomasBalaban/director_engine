@@ -1,0 +1,302 @@
+<div class="drawer-header">
+    <h2>🛑 Interrupt System Test</h2>
+    <button onclick="closeDebugDrawer()" class="close-btn">✕</button>
+</div>
+
+<div class="drawer-content">
+    <div class="mb-6">
+        <h3 class="text-sm font-bold text-gray-400 uppercase mb-3">Current Speech State</h3>
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Speaking</div>
+                <div class="stat-value" id="int-is-speaking">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Awaiting</div>
+                <div class="stat-value" id="int-awaiting">-</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Interrupts</div>
+                <div class="stat-value text-red-400" id="int-total-count">0</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Source</div>
+                <div class="stat-value text-xs" id="int-speech-source">-</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-6">
+        <h3 class="text-sm font-bold text-gray-400 uppercase mb-3">Test Controls</h3>
+        <p class="text-xs text-gray-500 mb-4">First make Nami "speak", then trigger a direct mention to test interruption.</p>
+        
+        <div class="space-y-3">
+            <div class="section-card">
+                <div class="section-header">
+                    <span class="section-title">Step 1: Simulate Nami Speaking</span>
+                    <span class="section-badge">SETUP</span>
+                </div>
+                <p class="text-xs text-gray-500 mb-2">Sets Nami to "speaking" state so we can test interruption.</p>
+                <div class="flex gap-2">
+                    <button onclick="simulateSpeaking()" class="run-tests-btn" style="background:#3b82f6;font-size:12px;padding:6px 12px;">🔇 Set Speaking</button>
+                    <button onclick="simulateStopSpeaking()" class="refresh-btn">🔊 Stop Speaking</button>
+                </div>
+            </div>
+
+            <div class="section-card priority-critical">
+                <div class="section-header">
+                    <span class="section-title">Step 2: Direct Mention (Mic)</span>
+                    <span class="section-badge" style="background:#ef4444;color:white;">INTERRUPT</span>
+                </div>
+                <p class="text-xs text-gray-500 mb-2">Simulates saying "Nami" on mic (DIRECT_MICROPHONE).</p>
+                <input type="text" id="int-mic-text" value="Hey Nami, what do you think about this?" class="w-full bg-[#1a1a1a] border border-[#555] rounded px-3 py-1.5 text-white text-sm mb-2 focus:outline-none focus:border-purple-500">
+                <button onclick="simulateInterrupt('mic')" class="run-tests-btn" style="background:#ef4444;font-size:12px;padding:6px 12px;">🎤 Simulate Mic Mention</button>
+            </div>
+
+            <div class="section-card priority-high">
+                <div class="section-header">
+                    <span class="section-title">Step 2b: Direct Mention (Twitch)</span>
+                    <span class="section-badge" style="background:#f59e0b;color:white;">INTERRUPT</span>
+                </div>
+                <p class="text-xs text-gray-500 mb-2">Simulates @Nami mention in Twitch chat (TWITCH_MENTION).</p>
+                <input type="text" id="int-twitch-text" value="@Nami you're terrible at this lmao" class="w-full bg-[#1a1a1a] border border-[#555] rounded px-3 py-1.5 text-white text-sm mb-2 focus:outline-none focus:border-purple-500">
+                <div class="flex gap-2 items-center mb-2">
+                    <label class="text-xs text-gray-500">Username:</label>
+                    <input type="text" id="int-twitch-user" value="peepingotter" class="bg-[#1a1a1a] border border-[#555] rounded px-2 py-1 text-white text-xs focus:outline-none focus:border-purple-500">
+                </div>
+                <button onclick="simulateInterrupt('twitch')" class="run-tests-btn" style="background:#f59e0b;color:#000;font-size:12px;padding:6px 12px;">💬 Simulate Twitch Mention</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-6">
+        <h3 class="text-sm font-bold text-gray-400 uppercase mb-3">Automated Test</h3>
+        <p class="text-xs text-gray-500 mb-3">Runs the full sequence: set speaking → wait → trigger mention → verify interrupt.</p>
+        <button onclick="runInterruptTest()" id="int-auto-test-btn" class="run-tests-btn" style="width:100%;">▶️ Run Full Interrupt Test</button>
+    </div>
+
+    <div>
+        <div class="flex justify-between items-center mb-2">
+            <h3 class="text-sm font-bold text-gray-400 uppercase">Test Log</h3>
+            <button onclick="clearInterruptLog()" class="refresh-btn">Clear</button>
+        </div>
+        <div id="int-test-log" class="bg-[#0a0a0a] border border-[#333] rounded-lg p-3 max-h-64 overflow-y-auto font-mono text-xs">
+            <div class="text-gray-500">Ready to test...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+async function refreshInterruptStats() {
+    try {
+        var res = await fetch('/interrupt_stats');
+        var data = await res.json();
+        var speakingEl = document.getElementById('int-is-speaking');
+        var awaitingEl = document.getElementById('int-awaiting');
+        var countEl = document.getElementById('int-total-count');
+        var sourceEl = document.getElementById('int-speech-source');
+        if (speakingEl) {
+            speakingEl.textContent = data.nami_currently_speaking ? '🔇 YES' : '🔊 NO';
+            speakingEl.className = 'stat-value ' + (data.nami_currently_speaking ? 'text-red-400' : 'text-green-400');
+        }
+        if (awaitingEl) {
+            awaitingEl.textContent = data.awaiting_user_response ? '⏳ YES' : 'NO';
+            awaitingEl.className = 'stat-value ' + (data.awaiting_user_response ? 'text-yellow-400' : 'text-gray-400');
+        }
+        if (countEl) countEl.textContent = data.total_interrupts || 0;
+        if (sourceEl) sourceEl.textContent = data.speech_source || 'N/A';
+    } catch (error) {
+        console.error('Error fetching interrupt stats:', error);
+    }
+}
+
+async function simulateSpeaking() {
+    try {
+        var res = await fetch('/simulate_speaking', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+        var data = await res.json();
+        logInterrupt('info', 'Set Nami to SPEAKING state (is_speaking: ' + data.is_speaking + ')');
+        refreshInterruptStats();
+    } catch (e) {
+        logInterrupt('error', 'Error: ' + e.message);
+    }
+}
+
+async function simulateStopSpeaking() {
+    try {
+        var res = await fetch('/simulate_stop_speaking', { method: 'POST' });
+        var data = await res.json();
+        logInterrupt('info', 'Cleared speaking state (is_speaking: ' + data.is_speaking + ')');
+        refreshInterruptStats();
+    } catch (e) {
+        logInterrupt('error', 'Error: ' + e.message);
+    }
+}
+
+async function simulateInterrupt(source) {
+    var text, username, payload;
+    if (source === 'twitch') {
+        text = document.getElementById('int-twitch-text').value;
+        username = document.getElementById('int-twitch-user').value;
+        payload = { source: 'twitch', text: text, username: username };
+    } else {
+        text = document.getElementById('int-mic-text').value;
+        payload = { source: 'mic', text: text, username: 'peepingotter' };
+    }
+
+    logInterrupt('info', 'Sending ' + source.toUpperCase() + ' interrupt: "' + text.substring(0, 40) + '..."');
+
+    try {
+        var res = await fetch('/simulate_interrupt', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        var data = await res.json();
+
+        if (data.interrupted) {
+            logInterrupt('pass', 'INTERRUPT SUCCESSFUL! Nami was speaking and got interrupted.');
+        } else if (data.was_speaking_before) {
+            logInterrupt('fail', 'INTERRUPT FAILED! Nami was speaking but did NOT get interrupted.');
+        } else {
+            logInterrupt('warn', 'Nami was NOT speaking. Event processed normally (no interrupt needed).');
+        }
+
+        logInterrupt('info', 'Before: speaking=' + data.was_speaking_before + ', awaiting=' + data.was_awaiting_before);
+        logInterrupt('info', 'After:  speaking=' + data.is_speaking_after + ', awaiting=' + data.is_awaiting_after);
+
+        refreshInterruptStats();
+    } catch (e) {
+        logInterrupt('error', 'Error: ' + e.message);
+    }
+}
+
+async function runInterruptTest() {
+    var btn = document.getElementById('int-auto-test-btn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Running...';
+    clearInterruptLog();
+
+    logInterrupt('info', '=== AUTOMATED INTERRUPT TEST ===');
+
+    try {
+        // Step 1: Get baseline
+        var statsRes = await fetch('/interrupt_stats');
+        var baseline = await statsRes.json();
+        var baselineCount = baseline.total_interrupts;
+        logInterrupt('info', 'Baseline interrupt count: ' + baselineCount);
+
+        // Step 2: Set Nami speaking
+        logInterrupt('info', 'Setting Nami to SPEAKING state...');
+        var speakRes = await fetch('/simulate_speaking', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+        var speakData = await speakRes.json();
+        refreshInterruptStats();
+
+        if (!speakData.is_speaking) {
+            logInterrupt('fail', 'Failed to set speaking state!');
+            return;
+        }
+        logInterrupt('pass', 'Nami is now speaking.');
+
+        // Step 3: Wait briefly
+        logInterrupt('info', 'Waiting 500ms...');
+        await new Promise(function(r) { setTimeout(r, 500); });
+
+        // Step 4: Verify still speaking
+        var checkRes = await fetch('/interrupt_stats');
+        var checkData = await checkRes.json();
+        if (!checkData.nami_currently_speaking) {
+            logInterrupt('fail', 'Nami stopped speaking before interrupt test! (timeout or bug)');
+            return;
+        }
+        logInterrupt('pass', 'Confirmed: Nami still speaking.');
+
+        // Step 5: Send interrupt via mic
+        logInterrupt('info', 'Sending DIRECT_MICROPHONE interrupt...');
+        var intRes = await fetch('/simulate_interrupt', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ source: 'mic', text: 'Hey Nami, can you hear me?', username: 'peepingotter' })
+        });
+        var intData = await intRes.json();
+        refreshInterruptStats();
+
+        // Step 6: Verify interrupt
+        if (intData.interrupted) {
+            logInterrupt('pass', '✅ TEST PASSED: Nami was interrupted by direct mic mention!');
+        } else {
+            logInterrupt('fail', '❌ TEST FAILED: Nami was NOT interrupted.');
+            logInterrupt('info', 'Debug: was_speaking=' + intData.was_speaking_before + ', is_speaking_after=' + intData.is_speaking_after);
+        }
+
+        // Step 7: Verify interrupt count incremented
+        var finalRes = await fetch('/interrupt_stats');
+        var finalData = await finalRes.json();
+        if (finalData.total_interrupts > baselineCount) {
+            logInterrupt('pass', 'Interrupt counter incremented: ' + baselineCount + ' -> ' + finalData.total_interrupts);
+        } else {
+            logInterrupt('warn', 'Interrupt counter did not increment (expected > ' + baselineCount + ', got ' + finalData.total_interrupts + ')');
+        }
+
+        // Step 8: Test Twitch mention interrupt
+        logInterrupt('info', '--- Testing TWITCH_MENTION interrupt ---');
+        await fetch('/simulate_speaking', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}' });
+        await new Promise(function(r) { setTimeout(r, 300); });
+
+        var twitchRes = await fetch('/simulate_interrupt', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ source: 'twitch', text: '@Nami skill issue', username: 'testuser123' })
+        });
+        var twitchData = await twitchRes.json();
+        refreshInterruptStats();
+
+        if (twitchData.interrupted) {
+            logInterrupt('pass', '✅ Twitch mention interrupt PASSED!');
+        } else {
+            logInterrupt('fail', '❌ Twitch mention interrupt FAILED.');
+        }
+
+        logInterrupt('info', '=== TEST COMPLETE ===');
+
+    } catch (e) {
+        logInterrupt('error', 'Test error: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '▶️ Run Full Interrupt Test';
+    }
+}
+
+function logInterrupt(level, message) {
+    var logEl = document.getElementById('int-test-log');
+    if (!logEl) return;
+
+    var colorMap = { pass: '#22c55e', fail: '#ef4444', warn: '#fbbf24', error: '#ef4444', info: '#9ca3af' };
+    var iconMap = { pass: '✅', fail: '❌', warn: '⚠️', error: '💥', info: 'ℹ️' };
+
+    var time = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    var div = document.createElement('div');
+    div.style.color = colorMap[level] || '#9ca3af';
+    div.style.marginBottom = '2px';
+    div.textContent = '[' + time + '] ' + (iconMap[level] || '') + ' ' + message;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+function clearInterruptLog() {
+    var logEl = document.getElementById('int-test-log');
+    if (logEl) logEl.innerHTML = '<div class="text-gray-500">Ready to test...</div>';
+}
+
+function startInterrupt_testRefresh() {
+    refreshInterruptStats();
+    if (window.interruptTestInterval) clearInterval(window.interruptTestInterval);
+    window.interruptTestInterval = setInterval(refreshInterruptStats, 2000);
+}
+
+function stopInterrupt_testRefresh() {
+    if (window.interruptTestInterval) {
+        clearInterval(window.interruptTestInterval);
+        window.interruptTestInterval = null;
+    }
+}
+</script>
