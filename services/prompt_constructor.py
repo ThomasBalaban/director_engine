@@ -219,14 +219,6 @@ class PromptConstructor:
             
         return "### AUDIO & CHAT LOG\n" + "\n".join(lines)
 
-    # --- Helper methods ---
-    def _format_scene_context(self, store: ContextStore) -> str:
-        mood_str = f"Current Mood: {store.current_mood} ({store.emotional_momentum})"
-        scene_str = f"Scene: {store.current_scene.name}"
-        flow_str = f"Conversation Flow: {store.current_flow.name}"
-        summary = store.current_summary or "Just starting up."
-        return f"{scene_str}\n{mood_str}\n{flow_str}\nSummary: {summary}"
-
     def _format_directive(self, directive: Directive) -> str:
         if not directive: 
             return ""

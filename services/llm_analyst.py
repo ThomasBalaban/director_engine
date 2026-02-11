@@ -178,17 +178,6 @@ def start_context_inference_task(store: ContextStore, callback: Callable[[Dict[s
     # Fire and forget - create task but don't await it
     asyncio.create_task(_task())
 
-
-def get_last_inferred_context() -> Optional[Dict[str, str]]:
-    """Returns the last successfully inferred context (non-blocking read)."""
-    return _last_inferred_result
-
-
-def is_context_inference_running() -> bool:
-    """Check if inference is currently in progress."""
-    return _context_inference_running
-
-
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""
     if username:

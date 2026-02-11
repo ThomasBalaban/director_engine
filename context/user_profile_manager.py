@@ -111,38 +111,6 @@ class UserProfileManager:
             return profile
         return profile
 
-    # --- Proactive Topic Suggestion ---
-    def get_under_discussed_fact(self, username: str) -> Optional[str]:
-        """Returns a fact that hasn't been discussed much, prioritizing variety."""
-        profile = self.get_profile(username)
-        facts = profile.get('facts', [])
-        if not facts: return None
-        
-        # Filter for facts not used recently (last 1 hour)
-        now = time.time()
-        available = [f for f in facts if (now - f.get('last_used', 0)) > 3600]
-        
-        if not available: return None
-        
-        # Sort by usage count (lowest first)
-        available.sort(key=lambda x: x.get('usage_count', 0))
-        
-        # Pick from the top 3 least used
-        candidates = available[:3]
-        selected = random.choice(candidates)
-        
-        return selected['content']
-
-    def mark_fact_used(self, username: str, fact_content: str):
-        """Increments usage count for a fact."""
-        profile = self.get_profile(username)
-        for fact in profile['facts']:
-            if fact['content'] == fact_content:
-                fact['usage_count'] = fact.get('usage_count', 0) + 1
-                fact['last_used'] = time.time()
-                self._save_json(self._get_filepath(username), profile)
-                return
-
     def _save_json(self, filepath: str, data: Dict[str, Any]):
         try:
             with open(filepath, 'w', encoding='utf-8') as f:

@@ -124,10 +124,3 @@ class MemoryOptimizer:
         
         return [m[1] for m in scored_memories[:limit]]
     
-    def force_add_memory(self, store: ContextStore, event: EventItem, summary: str = None):
-        """
-        Force an event into memory regardless of threshold.
-        Useful for manually important moments.
-        """
-        store.promote_to_memory(event, summary_text=summary)
-        print(f"🧠 [Memory] Force-added: {(summary or event.text)[:50]}...")

@@ -368,56 +368,7 @@ def build_smart_memory_query(store, summary_data: Dict[str, Any]) -> str:
     print(f"🧠 [Memory Query] Final query ({len(query)} chars): '{query[:80]}...'")
     
     return query
-
-
-def _build_memory_query(store, summary_data: Dict[str, Any]) -> str:
-    """
-    Build a rich query for semantic memory retrieval.
-    Combines recent speech, visual context, and topics for better matching.
-    """
-    query_parts = []
-    
-    # 1. Recent speech (what the user/streamer actually said)
-    layers = store.get_all_events_for_summary()
-    recent_speech = [
-        e.text for e in layers['immediate'] + layers['recent'] 
-        if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]
-    ][-3:]  # Last 3 speech events
-    
-    if recent_speech:
-        query_parts.extend(recent_speech)
-    
-    # 2. Recent visual keywords (what's on screen)
-    recent_visual = [
-        e.text for e in layers['immediate'] 
-        if e.source == InputSource.VISUAL_CHANGE
-    ][-1:]  # Most recent visual
-    
-    if recent_visual:
-        # Take just the first 100 chars of visual to avoid noise
-        query_parts.append(recent_visual[0][:100])
-    
-    # 3. Current topics from summary
-    topics = summary_data.get('topics', [])
-    if topics:
-        query_parts.extend(topics[:3])
-    
-    # 4. Fallback to summary if nothing else
-    if not query_parts:
-        summary = summary_data.get('summary', '')
-        if summary:
-            query_parts.append(summary)
-    
-    # Combine into a single query string
-    query = " ".join(query_parts)
-    
-    # Limit length to avoid issues
-    if len(query) > 500:
-        query = query[:500]
-    
-    return query
-
-        
+     
 async def summary_ticker():
     global last_context_inference_time
     
