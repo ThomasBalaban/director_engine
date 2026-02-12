@@ -111,8 +111,18 @@ class SensorBridge:
             return
 
         # Map to Director InputSource
+        # -------------------------------------------------------
+        # FIX: Only treat mic as DIRECT_MICROPHONE when "nami" is
+        # in the text. This mirrors the Twitch path where only
+        # peepingotter + "nami" triggers the interrupt pipeline.
+        # Regular speech goes through as MICROPHONE (no interrupt).
+        # -------------------------------------------------------
         if source_str == "microphone":
-            source = InputSource.DIRECT_MICROPHONE
+            if "nami" in text.lower():
+                source = InputSource.DIRECT_MICROPHONE
+                print(f"🎯 [Bridge] Name detected in speech → DIRECT_MICROPHONE")
+            else:
+                source = InputSource.MICROPHONE
         else:
             source = InputSource.AMBIENT_AUDIO
 
