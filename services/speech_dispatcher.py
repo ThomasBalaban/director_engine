@@ -5,7 +5,10 @@ The Speech Dispatcher - Decides when Nami should speak proactively.
 This module bridges the Director's "thinking" with Nami's "speaking".
 It monitors the stream state and pushes interjections to Nami when appropriate.
 
-NEW: Now checks if Nami is currently speaking before dispatching.
+RULES:
+- Never self-interrupt while speaking (unless "nami" direct address)
+- 5s breather after finishing speech (no machine-gun)
+- React freely to interesting events otherwise
 """
 
 import time
@@ -38,9 +41,9 @@ class SpeechDecision:
 class SpeechDispatcher:
     def __init__(self):
         self.last_speech_time = 0
-        self.min_speech_interval = 3.0  # Minimum between dispatches
-        self.post_response_cooldown = 10.0  # NEW: Cooldown after Nami responds to user
-        self.last_user_response_time = 0  # NEW: Track when Nami last responded to user
+        self.min_speech_interval = 5.0  # Match the post-speech breather
+        self.post_response_cooldown = 10.0  # Cooldown after Nami responds to user
+        self.last_user_response_time = 0  # Track when Nami last responded to user
         self.http_client: Optional[httpx.AsyncClient] = None
         self.reacted_event_ids: set = set()
         self.max_tracked_events = 50
@@ -74,31 +77,36 @@ class SpeechDispatcher:
         Evaluate whether Nami should speak right now.
         """
         import shared
+        
+        # Gate 1: Never interrupt herself
         if shared.is_nami_speaking():
+            return None
+        
+        # Gate 2: Brief breather after finishing speech (no machine-gun)
+        if shared.in_post_speech_cooldown():
             return None
         
         now = time.time()
         
-        # Check cooldown from last dispatch
+        # Gate 3: Min interval since last dispatch
         time_since_last = now - self.last_speech_time
         if time_since_last < self.min_speech_interval:
             return None
         
-        # NEW: Check post-response cooldown (don't interrupt after responding to user)
+        # Gate 4: Post-response cooldown (don't interrupt after responding to user)
         time_since_user_response = now - self.last_user_response_time
         if time_since_user_response < self.post_response_cooldown:
-            # Still in cooldown after responding to user
             return None
         
-        # Check energy
+        # Gate 5: Energy
         if not energy.can_afford(ENERGY_COST_INTERJECTION):
             return None
         
-        # Check flow - Don't interrupt if user is dominating
+        # Gate 6: Don't interrupt if user is dominating
         if store.current_flow == FlowState.DOMINATED:
             return None
         
-        # Look for trigger events
+        # All gates passed — look for trigger events
         decision = self._find_speech_trigger(store, behavior, directive)
         
         return decision
@@ -222,11 +230,11 @@ class SpeechDispatcher:
             )
         
         # --- Priority 3: Low-Threshold Events ---
-        # React to anything even remotely interesting (> 0.4)
+        # React to anything even remotely interesting (> 0.25)
         interesting_events = [
             e for e in immediate + recent[:3]
             if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
-            and e.score.interestingness >= 0.25  # Increased sensitivity
+            and e.score.interestingness >= 0.25  # Keep reactive
             and e.id not in self.reacted_event_ids
         ]
         
@@ -262,10 +270,15 @@ class SpeechDispatcher:
         """
         Send the speech request to Nami's interjection endpoint.
         """
-        # --- NEW: Double-check speech state before sending ---
         import shared
+        
+        # Double-check: don't send if she's speaking or in breather
         if shared.is_nami_speaking():
             print(f"🔇 [SpeechDispatcher] Blocked dispatch - Nami is still speaking")
+            return False
+        
+        if shared.in_post_speech_cooldown():
+            print(f"🔇 [SpeechDispatcher] Blocked dispatch - post-speech breather")
             return False
         
         if not self.http_client:

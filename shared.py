@@ -81,6 +81,7 @@ def is_context_locked() -> bool:
 # --- SPEECH STATE TRACKING ---
 nami_is_speaking: bool = False
 speech_started_time: float = 0.0
+last_speech_finished_time: float = 0.0   # NEW: When Nami last stopped talking
 SPEECH_TIMEOUT: float = 60.0
 last_speech_source: Optional[str] = None
 awaiting_user_response: bool = False
@@ -91,7 +92,7 @@ interrupt_count: int = 0
 
 def set_nami_speaking(is_speaking: bool, source: str = None):
     """Thread-safe setter for speech state."""
-    global nami_is_speaking, speech_started_time, last_speech_source, awaiting_user_response
+    global nami_is_speaking, speech_started_time, last_speech_source, awaiting_user_response, last_speech_finished_time
     nami_is_speaking = is_speaking
     if is_speaking:
         speech_started_time = time.time()
@@ -100,11 +101,13 @@ def set_nami_speaking(is_speaking: bool, source: str = None):
         print(f"🔇 [Speech Lock] Nami started speaking (source: {source}) - Director paused")
     else:
         duration = time.time() - speech_started_time if speech_started_time else 0
-        print(f"🔊 [Speech Lock] Nami finished speaking ({duration:.1f}s, was: {last_speech_source}) - Director resumed")
+        last_speech_finished_time = time.time()  # Record when she stopped
+        print(f"🔊 [Speech Lock] Nami finished speaking ({duration:.1f}s, was: {last_speech_source}) - {config.POST_SPEECH_COOLDOWN}s breather")
         
-        if last_speech_source == 'USER_DIRECT':
-            awaiting_user_response = True
-            print(f"⏳ [Speech Lock] Awaiting user response - idle suppressed")
+        # Clear awaiting state — she just finished talking, breather handles the gap
+        if awaiting_user_response:
+            awaiting_user_response = False
+            print(f"✅ [Speech Lock] Awaiting cleared — replied to user, resuming after breather")
 
 def clear_user_awaiting():
     """Call this when user speaks again, clearing the awaiting state."""
@@ -113,10 +116,30 @@ def clear_user_awaiting():
         print(f"✅ [Speech Lock] User responded - idle can resume")
     awaiting_user_response = False
 
+def in_post_speech_cooldown() -> bool:
+    """
+    Returns True during the brief breather after Nami finishes speaking.
+    Prevents machine-gun speech (talk → immediate talk → immediate talk).
+    
+    Does NOT block reactive interjections from process_engine_event
+    (direct address still breaks through via trigger_nami_interjection).
+    """
+    global last_speech_finished_time
+    if last_speech_finished_time == 0.0:
+        return False
+    return (time.time() - last_speech_finished_time) < config.POST_SPEECH_COOLDOWN
+
 def should_suppress_idle() -> bool:
-    """Returns True if idle thoughts should be suppressed."""
+    """
+    Returns True if idle/proactive thoughts and speech should be suppressed.
+    
+    Suppressed when:
+    1. Nami is currently speaking (never interrupt herself)
+    2. Nami is awaiting user response (she asked something, wait for answer)
+    3. Brief post-speech breather (5s — no machine-gun)
+    """
     global awaiting_user_response, nami_is_speaking
-    return nami_is_speaking or awaiting_user_response
+    return nami_is_speaking or awaiting_user_response or in_post_speech_cooldown()
 
 def is_nami_speaking() -> bool:
     """Check if Nami is currently speaking (with timeout failsafe)."""
@@ -192,6 +215,7 @@ def get_interrupt_stats() -> Dict[str, Any]:
         "seconds_since_last": round(time.time() - last_interrupt_time, 1) if last_interrupt_time else None,
         "nami_currently_speaking": is_nami_speaking(),
         "awaiting_user_response": awaiting_user_response,
+        "in_post_speech_cooldown": in_post_speech_cooldown(),
         "speech_source": last_speech_source
     }
 

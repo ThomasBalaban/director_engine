@@ -80,9 +80,10 @@ ENERGY_COST_PATTERN = 5.0
 # --- Memory & Proactivity Config ---
 MEMORY_DECAY_RATE = 0.05 
 MEMORY_RETRIEVAL_LIMIT = 5
-CURIOSITY_INTERVAL = 8.0         # LOWERED: Bored every 8s
+CURIOSITY_INTERVAL = 10.0        # Fill silence after ~10s of nothing
 CALLBACK_INTERVAL = 45.0 
 COMPRESSION_INTERVAL = 30.0 
+POST_SPEECH_COOLDOWN = 5.0       # Brief breather after speaking (anti machine-gun)
 
 # --- Director Config ---
 DIRECTOR_PORT = 8002
