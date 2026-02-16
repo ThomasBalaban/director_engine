@@ -300,7 +300,8 @@ async def analyze_and_update_event(
 
             if new_score.urgency >= INTERJECTION_THRESHOLD:
                 is_interrupt = event.metadata.get('interrupt_priority', False)
-                await trigger_nami_interjection(event, new_score.urgency, is_interrupt=is_interrupt)
+                if not event.metadata.get('is_direct_address'):
+                    await trigger_nami_interjection(event, new_score.urgency, is_interrupt=is_interrupt)
 
         if new_sentiment:
              store.update_event_metadata(event.id, {"sentiment": new_sentiment})

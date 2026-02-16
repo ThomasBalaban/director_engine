@@ -143,7 +143,7 @@ def should_suppress_idle() -> bool:
 
 def is_nami_speaking() -> bool:
     """Check if Nami is currently speaking (with timeout failsafe)."""
-    global nami_is_speaking, speech_started_time
+    global nami_is_speaking, speech_started_time, awaiting_user_response
     
     if not nami_is_speaking:
         return False
@@ -151,6 +151,9 @@ def is_nami_speaking() -> bool:
     if speech_started_time and (time.time() - speech_started_time) > SPEECH_TIMEOUT:
         print(f"⚠️ [Speech Lock] Timeout reached ({SPEECH_TIMEOUT}s) - forcing unlock")
         nami_is_speaking = False
+        # FIX: Also clear the awaiting flag on timeout to prevent permanent silence
+        if awaiting_user_response:
+            awaiting_user_response = False
         return False
     
     return True
