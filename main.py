@@ -10,13 +10,11 @@ state to the prompt service, not here.
 import uvicorn
 import asyncio
 import threading
-import webbrowser
 import signal as signal_module
 import time
 import traceback
 from pathlib import Path
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
@@ -37,8 +35,6 @@ socket_app = socketio.ASGIApp(shared.sio)
 app.mount('/socket.io', socket_app)
 
 base_path = Path(__file__).parent.resolve()
-ui_path = base_path / "ui"
-audio_path = base_path / "audio_effects"
 
 # --- TASKS ---
 summary_ticker_task: Optional[asyncio.Task] = None
@@ -55,13 +51,6 @@ class EventPayload(BaseModel):
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "server_ready": shared.server_ready}
-
-@app.get("/audio_effects/{filename}")
-async def serve_audio_effect(filename: str):
-    file_path = audio_path / filename
-    if not file_path.exists() or not str(file_path.resolve()).startswith(str(audio_path.resolve())):
-        return {"error": "Invalid file"}
-    return FileResponse(file_path, media_type="audio/wav")
 
 @app.get("/summary", response_class=PlainTextResponse)
 async def get_summary():
@@ -142,23 +131,12 @@ async def get_prompt_size():
         "sections": context.count('<')
     }
 
-@app.get("/run_tests")
-async def run_quality_tests():
-    from test_framework import PromptQualityTester
-    tester = PromptQualityTester(shared.store, shared.prompt_constructor)
-    report = await tester.run_all_tests()
-    return report
-
 @app.get("/lock_states")
 async def get_lock_states():
     return {
         "streamer_locked": shared.is_streamer_locked(),
         "context_locked": shared.is_context_locked()
     }
-
-# --- IMPORTANT: Mount static files AFTER all API routes ---
-app.mount("/static", StaticFiles(directory=ui_path, html=True), name="static")
-app.mount("/", StaticFiles(directory=ui_path, html=True), name="ui_static")
 
 # --- SOCKET HANDLERS ---
 @shared.sio.on("event")
@@ -221,13 +199,6 @@ async def handle_set_context_lock(sid, payload: dict):
     locked = payload.get('locked', False)
     shared.set_context_locked(locked)
 
-
-# --- SERVER LIFECYCLE ---
-def open_browser():
-    try: 
-        webbrowser.open(f"http://localhost:{config.DIRECTOR_PORT}")
-    except: 
-        pass
 
 async def run_ticker_with_recovery(ticker_func, name: str):
     while shared.server_ready:
@@ -354,5 +325,4 @@ def run_server():
 if __name__ == "__main__":
     print("🧠 DIRECTOR ENGINE (Brain 1) - Starting...")
     process_manager.launch_vision_app()
-    threading.Timer(2.0, open_browser).start()
     run_server()
