@@ -105,3 +105,5 @@ MOOD_WINDOW_SIZE = 5
 OLLAMA_TRIGGER_THRESHOLD = 0.5
 OLLAMA_MODEL = 'llama3.2:latest'
 OLLAMA_HOST = 'http://localhost:11434'
+
+PROMPT_SERVICE_URL = "http://localhost:8001"

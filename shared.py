@@ -1,4 +1,12 @@
 # Save as: director_engine/shared.py
+"""
+Shared state and singletons for the Director Engine.
+
+NOTE: All speaking state (is_nami_speaking, cooldowns, interrupts)
+has been moved to the Prompt Service (port 8001).
+The brain no longer tracks whether Nami is speaking.
+"""
+
 import asyncio
 import socketio
 import time
@@ -19,7 +27,6 @@ from services.prompt_constructor import PromptConstructor
 from services.speech_dispatcher import SpeechDispatcher
 
 # --- GLOBAL SINGLETONS ---
-# Note: sio will be replaced by main.py with a properly configured server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 server_ready: bool = False
@@ -78,149 +85,6 @@ def is_context_locked() -> bool:
     global context_locked
     return context_locked
 
-# --- SPEECH STATE TRACKING ---
-nami_is_speaking: bool = False
-speech_started_time: float = 0.0
-last_speech_finished_time: float = 0.0   # NEW: When Nami last stopped talking
-SPEECH_TIMEOUT: float = 60.0
-last_speech_source: Optional[str] = None
-awaiting_user_response: bool = False
-
-# --- INTERRUPT TRACKING ---
-last_interrupt_time: float = 0.0
-interrupt_count: int = 0
-
-def set_nami_speaking(is_speaking: bool, source: str = None):
-    """Thread-safe setter for speech state."""
-    global nami_is_speaking, speech_started_time, last_speech_source, awaiting_user_response, last_speech_finished_time
-    nami_is_speaking = is_speaking
-    if is_speaking:
-        speech_started_time = time.time()
-        if source:
-            last_speech_source = source
-        print(f"🔇 [Speech Lock] Nami started speaking (source: {source}) - Director paused")
-    else:
-        duration = time.time() - speech_started_time if speech_started_time else 0
-        last_speech_finished_time = time.time()  # Record when she stopped
-        print(f"🔊 [Speech Lock] Nami finished speaking ({duration:.1f}s, was: {last_speech_source}) - {config.POST_SPEECH_COOLDOWN}s breather")
-        
-        # Clear awaiting state — she just finished talking, breather handles the gap
-        if awaiting_user_response:
-            awaiting_user_response = False
-            print(f"✅ [Speech Lock] Awaiting cleared — replied to user, resuming after breather")
-
-def clear_user_awaiting():
-    """Call this when user speaks again, clearing the awaiting state."""
-    global awaiting_user_response
-    if awaiting_user_response:
-        print(f"✅ [Speech Lock] User responded - idle can resume")
-    awaiting_user_response = False
-
-def in_post_speech_cooldown() -> bool:
-    """
-    Returns True during the brief breather after Nami finishes speaking.
-    Prevents machine-gun speech (talk → immediate talk → immediate talk).
-    
-    Does NOT block reactive interjections from process_engine_event
-    (direct address still breaks through via trigger_nami_interjection).
-    """
-    global last_speech_finished_time
-    if last_speech_finished_time == 0.0:
-        return False
-    return (time.time() - last_speech_finished_time) < config.POST_SPEECH_COOLDOWN
-
-def should_suppress_idle() -> bool:
-    """
-    Returns True if idle/proactive thoughts and speech should be suppressed.
-    
-    Suppressed when:
-    1. Nami is currently speaking (never interrupt herself)
-    2. Nami is awaiting user response (she asked something, wait for answer)
-    3. Brief post-speech breather (5s — no machine-gun)
-    """
-    global awaiting_user_response, nami_is_speaking
-    return nami_is_speaking or awaiting_user_response or in_post_speech_cooldown()
-
-def is_nami_speaking() -> bool:
-    """Check if Nami is currently speaking (with timeout failsafe)."""
-    global nami_is_speaking, speech_started_time, awaiting_user_response
-    
-    if not nami_is_speaking:
-        return False
-    
-    if speech_started_time and (time.time() - speech_started_time) > SPEECH_TIMEOUT:
-        print(f"⚠️ [Speech Lock] Timeout reached ({SPEECH_TIMEOUT}s) - forcing unlock")
-        nami_is_speaking = False
-        # FIX: Also clear the awaiting flag on timeout to prevent permanent silence
-        if awaiting_user_response:
-            awaiting_user_response = False
-        return False
-    
-    return True
-
-# --- INTERRUPT SYSTEM ---
-def interrupt_nami(reason: str = "direct_mention") -> bool:
-    """
-    Force-interrupt Nami's current speech for high-priority direct interactions.
-    This clears the speaking lock AND emits an interrupt signal to Nami's TTS.
-    
-    ONE-SHOT DESIGN:
-    - Clears nami_is_speaking so the interrupt interjection can be sent
-    - KEEPS awaiting_user_response = True so the reflex ticker and speech
-      dispatcher stay suppressed after the interrupt reply goes out
-    - Does NOT reset speech_dispatcher cooldowns
-    
-    This means: interrupt fires -> Nami replies once -> then she goes back to
-    being suppressed until the user speaks again naturally.
-    
-    Returns True if Nami was actually speaking (and got interrupted).
-    """
-    global nami_is_speaking, awaiting_user_response, last_interrupt_time, interrupt_count
-    was_speaking = nami_is_speaking
-    nami_is_speaking = False
-    last_interrupt_time = time.time()
-    interrupt_count += 1
-    
-    # KEEP awaiting_user_response = True so the reflex ticker and speech
-    # dispatcher stay suppressed after the interrupt reply goes out.
-    # This prevents Nami from "routinely interrupting herself."
-    awaiting_user_response = True
-    
-    if was_speaking:
-        print(f"🛑 [INTERRUPT] Nami interrupted! Reason: {reason}")
-        # Signal to Nami's TTS to stop immediately
-        _emit_threadsafe('interrupt_speech', {
-            'reason': reason,
-            'timestamp': time.time()
-        })
-        # Also signal to UI for debugging
-        _emit_threadsafe('nami_interrupted', {
-            'reason': reason,
-            'timestamp': time.time(),
-            'interrupt_count': interrupt_count
-        })
-    else:
-        print(f"🛑 [INTERRUPT] Interrupt requested but Nami wasn't speaking (reason: {reason})")
-    
-    # DO NOT reset speech_dispatcher cooldowns.
-    # The interrupt interjection bypasses the speech dispatcher entirely
-    # (sent directly via trigger_nami_interjection). After Nami replies,
-    # awaiting_user_response=True keeps idle/proactive speech suppressed
-    # until the user speaks again naturally.
-    
-    return was_speaking
-
-def get_interrupt_stats() -> Dict[str, Any]:
-    """Get interrupt statistics for debugging."""
-    return {
-        "total_interrupts": interrupt_count,
-        "last_interrupt_time": last_interrupt_time,
-        "seconds_since_last": round(time.time() - last_interrupt_time, 1) if last_interrupt_time else None,
-        "nami_currently_speaking": is_nami_speaking(),
-        "awaiting_user_response": awaiting_user_response,
-        "in_post_speech_cooldown": in_post_speech_cooldown(),
-        "speech_source": last_speech_source
-    }
 
 # --- ENGINE INITIALIZATION ---
 store = ContextStore()
@@ -255,9 +119,7 @@ def _emit_threadsafe(event: str, data: dict):
     
     try:
         future = asyncio.run_coroutine_threadsafe(sio.emit(event, data), ui_event_loop)
-        # Don't wait for result - fire and forget
     except RuntimeError as e:
-        # Event loop closed or similar - ignore silently during shutdown
         if "closed" not in str(e).lower() and server_ready:
             print(f"⚠️ UI Emit Error ({event}): {e}")
     except Exception as e:
@@ -296,7 +158,6 @@ def emit_event_scored(event: EventItem):
     })
 
 def emit_ai_context_suggestion(streamer: str = None, context: str = None):
-    """Emit AI-generated context suggestions to the UI."""
     _emit_threadsafe('ai_context_suggestion', {
         'streamer': streamer,
         'context': context,

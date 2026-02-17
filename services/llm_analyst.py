@@ -1,4 +1,11 @@
 # Save as: director_engine/services/llm_analyst.py
+"""
+LLM Analyst — Uses Ollama for event analysis, scoring, and summarization.
+
+NOTE: trigger_nami_interjection now routes through the Prompt Service
+instead of POSTing directly to Nami.
+"""
+
 import ollama
 import json
 import httpx
@@ -17,13 +24,11 @@ from typing import List, Tuple, Callable, Any, Optional, Dict
 http_client: httpx.AsyncClient | None = None
 ollama_client: ollama.AsyncClient | None = None
 
-# --- Context Inference State (non-blocking) ---
+# --- Context Inference State ---
 _context_inference_running = False
 _last_inferred_result: Optional[Dict[str, str]] = None
 
-# --- LOWERED MEMORY THRESHOLD ---
-# Events with this score or higher get promoted to long-term memory
-MEMORY_PROMOTION_THRESHOLD = 0.70  # Lowered from 0.85
+MEMORY_PROMOTION_THRESHOLD = 0.70
 
 async def create_http_client():
     global http_client, ollama_client
@@ -42,9 +47,9 @@ async def close_http_client():
         await http_client.aclose()
         http_client = None
 
-# --- Thought Generation for Internal Monologue ---
+
+# --- Thought Generation ---
 async def generate_thought(prompt_text: str) -> Optional[str]:
-    """Generates a short, quirky thought based on the behavior engine's prompt."""
     if not ollama_client: return None
     
     full_prompt = (
@@ -65,12 +70,9 @@ async def generate_thought(prompt_text: str) -> Optional[str]:
         print(f"[Analyst] Thought generation error: {e}")
         return None
 
-# --- NON-BLOCKING Context Inference using Ollama ---
+
+# --- NON-BLOCKING Context Inference ---
 async def _do_context_inference(store: ContextStore) -> Optional[Dict[str, str]]:
-    """
-    Internal function that actually performs the inference.
-    Called as a background task - never blocks the main loop.
-    """
     global _context_inference_running, _last_inferred_result
     
     if not ollama_client: 
@@ -79,7 +81,6 @@ async def _do_context_inference(store: ContextStore) -> Optional[Dict[str, str]]
     try:
         layers = store.get_all_events_for_summary()
         
-        # Gather recent visual and audio context
         recent_visuals = [e.text for e in layers['immediate'] + layers['recent'] 
                           if e.source == InputSource.VISUAL_CHANGE][-5:]
         recent_audio = [e.text for e in layers['immediate'] + layers['recent'] 
@@ -111,23 +112,21 @@ Respond ONLY with this JSON (no other text):
 Rules:
 - Game should be the actual game title if identifiable
 - Context should be SHORT (under 120 chars)
-- Context should describe current activity (e.g. "Exploring haunted asylum, looking for ghost evidence")
+- Context should describe current activity
 - If unsure, say "Unknown" for game
 """
         
-        # Use asyncio.wait_for to add a timeout so it never hangs
         response = await asyncio.wait_for(
             ollama_client.chat(
                 model=OLLAMA_MODEL,
                 messages=[{'role': 'user', 'content': prompt}],
                 options={"temperature": 0.3, "num_predict": 100}
             ),
-            timeout=10.0  # 10 second timeout
+            timeout=10.0
         )
         
         result_text = response['message']['content'].strip()
         
-        # Parse JSON
         start = result_text.find('{')
         end = result_text.rfind('}') + 1
         if start == -1 or end == 0:
@@ -138,7 +137,6 @@ Rules:
         game = data.get('game', 'Unknown')
         context = data.get('context', '')
         
-        # Enforce 120 char limit
         if len(context) > 120:
             context = context[:117] + "..."
         
@@ -147,7 +145,7 @@ Rules:
         return result
         
     except asyncio.TimeoutError:
-        print(f"[Analyst] ⏱️ Context inference timed out (non-blocking, continuing)")
+        print(f"[Analyst] ⏱️ Context inference timed out")
         return None
     except Exception as e:
         print(f"[Analyst] Context inference error: {e}")
@@ -157,14 +155,8 @@ Rules:
 
 
 def start_context_inference_task(store: ContextStore, callback: Callable[[Dict[str, str]], None] = None):
-    """
-    Starts a background task for context inference.
-    Non-blocking - returns immediately. 
-    Calls the callback with results when done (if provided).
-    """
     global _context_inference_running
     
-    # Don't start if already running
     if _context_inference_running:
         return
     
@@ -175,8 +167,10 @@ def start_context_inference_task(store: ContextStore, callback: Callable[[Dict[s
         if result and callback:
             callback(result)
     
-    # Fire and forget - create task but don't await it
     asyncio.create_task(_task())
+
+
+# --- Analysis ---
 
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""
@@ -252,6 +246,7 @@ def parse_llm_response(response_text: str) -> Tuple[EventScore | None, str | Non
         print(f"[Analyst] Error parsing LLM response: {e}")
         return None, None, None, []
 
+
 async def analyze_and_update_event(
     event: EventItem, 
     store: ContextStore,
@@ -285,8 +280,6 @@ async def analyze_and_update_event(
                 event.score = new_score
                 score_updated = True
             
-            # --- LOWERED THRESHOLD for memory promotion ---
-            # Also consider conversational_value for memory worthiness
             should_promote = (
                 new_score.interestingness >= MEMORY_PROMOTION_THRESHOLD or
                 new_score.conversational_value >= 0.75 or
@@ -296,8 +289,8 @@ async def analyze_and_update_event(
             if should_promote:
                 store.promote_to_memory(event, summary_text=summary_str)
                 promoted = True
-                print(f"💾 [Analyst] Promoted to memory: {summary_str[:50] if summary_str else event.text[:50]}...")
 
+            # High urgency → send interjection request to prompt service
             if new_score.urgency >= INTERJECTION_THRESHOLD:
                 is_interrupt = event.metadata.get('interrupt_priority', False)
                 if not event.metadata.get('is_direct_address'):
@@ -320,36 +313,31 @@ async def analyze_and_update_event(
     except Exception as e:
         print(f"[Analyst] ERROR: Ollama call failed for event {event.id}: {e}")
 
+
 async def trigger_nami_interjection(event: EventItem, urgency_score: float, is_interrupt: bool = False) -> bool:
     """
-    Send an interjection to Nami.
-    
-    If is_interrupt=True, this is a direct address that should interrupt 
-    whatever Nami is currently saying.
+    Send an interjection request to the PROMPT SERVICE (not directly to Nami).
+    The prompt service will gate it and forward to Nami if appropriate.
     """
-    global http_client
-    if not http_client: return False
-    try:
-        interject_payload = {
-            "content": event.text,
-            "priority": 0.0 if is_interrupt else (1.0 - urgency_score),  # 0.0 = highest priority
-            "source_info": {
-                "source": f"DIRECTOR_{event.source.name}", 
-                "use_tts": True,
-                "is_interrupt": is_interrupt,  # NEW: Signal to Nami that this interrupts
-                "is_direct_address": event.metadata.get('is_direct_address', False),
-                **{k: v for k, v in event.metadata.items() if k not in ['is_direct_address']}
-            }
+    import services.prompt_client as prompt_client
+    
+    result = await prompt_client.request_speech(
+        trigger=f"urgency_{event.source.name}",
+        content=event.text,
+        priority=0.0 if is_interrupt else (1.0 - urgency_score),
+        source=f"DIRECTOR_{event.source.name}",
+        is_interrupt=is_interrupt,
+        event_id=event.id,
+        metadata={
+            'is_direct_address': event.metadata.get('is_direct_address', False),
+            **{k: v for k, v in event.metadata.items() if k not in ['is_direct_address']}
         }
-        
-        if is_interrupt:
-            print(f"🛑 [Analyst] Sending INTERRUPT interjection: {event.text[:50]}...")
-        
-        response = await http_client.post(NAMI_INTERJECT_URL, json=interject_payload, timeout=2.0)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"[Director] FAILED to send interjection: {e}")
-        return False
+    )
+    
+    return result.get("delivered", False)
+
+
+# --- Summary Generation ---
 
 def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
     def format_layer(events):
@@ -406,6 +394,7 @@ Intent: <{intent_states}>
 """
     return prompt_context, prompt
 
+
 async def generate_summary(store: ContextStore):
     if not ollama_client: return
 
@@ -423,7 +412,6 @@ async def generate_summary(store: ContextStore):
         summary_text = full_response
         prediction_text = "None"
         
-        # Parse Summary & Prediction
         if "[SUMMARY]" in full_response:
             parts = full_response.split("[SUMMARY]")
             if len(parts) > 1:
@@ -438,7 +426,6 @@ async def generate_summary(store: ContextStore):
                         prediction_text = split_class[0].strip()
                         class_block = split_class[1].strip()
                         
-                        # Parse Classification Block
                         lines = class_block.split('\n')
                         for line in lines:
                             line = line.strip().upper()
