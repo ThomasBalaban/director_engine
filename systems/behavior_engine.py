@@ -94,12 +94,7 @@ class BehaviorEngine:
             return None
         
         # NEW: Import and check the speech dispatcher's cooldown
-        import shared
-        time_since_user_response = now - shared.speech_dispatcher.last_user_response_time
-        if time_since_user_response < shared.speech_dispatcher.post_response_cooldown:
-            # Don't generate thoughts right after responding to user
-            return None
-        
+        import shared        
         chat_vel, _ = store.get_activity_metrics()
         
         should_ramble = (

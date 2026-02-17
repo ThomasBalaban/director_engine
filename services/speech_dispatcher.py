@@ -37,8 +37,6 @@ class SpeechDecision:
 
 class SpeechDispatcher:
     def __init__(self):
-        self.last_user_response_time = 0
-        self.post_response_cooldown = 0
         pass
 
     def evaluate(
