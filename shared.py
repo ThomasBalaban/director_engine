@@ -27,7 +27,7 @@ from services.prompt_constructor import PromptConstructor
 from services.speech_dispatcher import SpeechDispatcher
 
 # --- GLOBAL SINGLETONS ---
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+sio = socketio.AsyncClient(reconnection=True, reconnection_attempts=0, reconnection_delay=2)
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 server_ready: bool = False
 

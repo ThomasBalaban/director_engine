@@ -86,7 +86,8 @@ COMPRESSION_INTERVAL = 30.0
 POST_SPEECH_COOLDOWN = 5.0       # Brief breather after speaking (anti machine-gun)
 
 # --- Director Config ---
-DIRECTOR_PORT = 8002
+DIRECTOR_PORT = 8006
+HUB_URL = "http://localhost:8002" 
 DIRECTOR_HOST = "0.0.0.0"
 WINDOW_IMMEDIATE = 10.0
 WINDOW_RECENT = 30.0

@@ -2,6 +2,9 @@
 """
 Director Engine — The Brain.
 
+Connects to the Central Hub (port 8002) as a Socket.IO CLIENT.
+Exposes REST API on port 8006.
+
 NOTE: Speech state endpoints (/speech_started, /speech_finished, /interrupt_*)
 have been moved to the Prompt Service (port 8001). Nami now reports her TTS
 state to the prompt service, not here.
@@ -18,7 +21,6 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
-import socketio
 
 import config
 from systems import process_manager
@@ -30,9 +32,8 @@ import shared
 import core_logic
 
 # --- APP SETUP ---
+# NOTE: No socket_app or sio mount here — director is now a hub CLIENT, not a server.
 app = FastAPI(title="Nami Director Engine")
-socket_app = socketio.ASGIApp(shared.sio)
-app.mount('/socket.io', socket_app)
 
 base_path = Path(__file__).parent.resolve()
 
@@ -40,13 +41,16 @@ base_path = Path(__file__).parent.resolve()
 summary_ticker_task: Optional[asyncio.Task] = None
 reflex_ticker_task: Optional[asyncio.Task] = None
 sensor_bridge_task: Optional[asyncio.Task] = None
+hub_connection_task: Optional[asyncio.Task] = None
 
-# --- MODELS & ROUTES ---
+# --- MODELS ---
 class EventPayload(BaseModel):
     source_str: str
     text: str
     metadata: Dict[str, Any] = {}
     username: Optional[str] = None
+
+# --- REST ROUTES ---
 
 @app.get("/health")
 async def health_check():
@@ -60,7 +64,7 @@ async def get_summary():
 @app.get("/summary_data")
 async def get_summary_data():
     data = shared.store.get_summary_data()
-    if data['directive']: 
+    if data['directive']:
         data['directive'] = data['directive'].to_dict()
     return data
 
@@ -74,20 +78,20 @@ async def get_breadcrumbs(count: int = 3):
         summary_data = shared.store.get_summary_data()
         current_query = summary_data.get('summary', "") or " ".join(summary_data.get('topics', []))
         smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
-        
+
         directive = summary_data.get('directive')
-        
+
         formatted_context = await shared.prompt_constructor.construct_context_block(
             shared.store, directive, smart_memories[:3]
         )
-        
+
         return {"formatted_context": formatted_context}
-        
+
     except Exception as e:
         print(f"❌ [/breadcrumbs] Error: {type(e).__name__}: {e}")
         traceback.print_exc()
         return {"formatted_context": f"[Director Error: {str(e)}]"}
-    
+
 @app.get("/thread_stats")
 async def get_thread_stats():
     return shared.store.thread_manager.get_stats()
@@ -97,14 +101,14 @@ async def get_prompt_debug():
     summary_data = shared.store.get_summary_data()
     current_query = summary_data.get('summary', "") or " ".join(summary_data.get('topics', []))
     smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
-    
+
     directive = summary_data.get('directive')
     formatted_context = await shared.prompt_constructor.construct_context_block(
         shared.store, directive, smart_memories[:3]
     )
-    
+
     detail_mode = shared.prompt_constructor.detail_controller.select_detail_mode(shared.store)
-    
+
     return {
         "formatted_context": formatted_context,
         "detail_mode": detail_mode,
@@ -118,12 +122,12 @@ async def get_prompt_size():
     summary_data = shared.store.get_summary_data()
     current_query = summary_data.get('summary', "")
     smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
-    
+
     directive = summary_data.get('directive')
     context = await shared.prompt_constructor.construct_context_block(
         shared.store, directive, smart_memories[:3]
     )
-    
+
     return {
         "char_count": len(context),
         "estimated_tokens": len(context) // 4,
@@ -138,22 +142,34 @@ async def get_lock_states():
         "context_locked": shared.is_context_locked()
     }
 
-# --- SOCKET HANDLERS ---
+
+# --- SOCKET.IO CLIENT EVENT HANDLERS ---
+# These are registered on the AsyncClient in shared.py.
+# NOTE: Client-side handlers do NOT have a `sid` parameter.
+
+@shared.sio.on("connect")
+async def on_hub_connect():
+    print("✅ [Director] Connected to Hub")
+
+@shared.sio.on("disconnect")
+async def on_hub_disconnect():
+    print("⚠️ [Director] Disconnected from Hub")
+
 @shared.sio.on("event")
-async def ingest_event(sid, payload: dict):
+async def ingest_event(payload: dict):
     try:
         model = EventPayload(**payload)
         await core_logic.process_engine_event(
-            config.InputSource[model.source_str], 
-            model.text, 
-            model.metadata, 
+            config.InputSource[model.source_str],
+            model.text,
+            model.metadata,
             model.username
         )
     except Exception as e:
         print(f"[DirectorEngine] Invalid event payload: {e}")
 
 @shared.sio.on("bot_reply")
-async def receive_bot_reply(sid, payload: dict):
+async def receive_bot_reply(payload: dict):
     try:
         reply_text = payload.get('reply', '')
         active_thread = shared.store.thread_manager.get_active_thread()
@@ -164,51 +180,67 @@ async def receive_bot_reply(sid, payload: dict):
                 text=reply_text,
                 resolves_thread=resolves
             )
-        
+
         shared.emit_bot_reply(
-            payload.get('reply', ''), 
-            payload.get('prompt', ''), 
+            payload.get('reply', ''),
+            payload.get('prompt', ''),
             payload.get('is_censored', False),
             payload.get('censorship_reason'),
             payload.get('filtered_area')
         )
-        
-        # Tell prompt service: Nami just responded to user
+
         asyncio.create_task(prompt_client.notify_bot_response())
 
     except Exception as e:
         print(f"[DirectorEngine] Error handling bot_reply: {e}")
 
 @shared.sio.on("set_streamer")
-async def handle_set_streamer(sid, payload: dict):
+async def handle_set_streamer(payload: dict):
     streamer_id = payload.get('streamer_id', 'peepingotter')
     shared.set_current_streamer(streamer_id, from_ai=False)
 
 @shared.sio.on("set_manual_context")
-async def handle_set_manual_context(sid, payload: dict):
+async def handle_set_manual_context(payload: dict):
     context = payload.get('context', '')
     shared.set_manual_context(context, from_ai=False)
 
 @shared.sio.on("set_streamer_lock")
-async def handle_set_streamer_lock(sid, payload: dict):
+async def handle_set_streamer_lock(payload: dict):
     locked = payload.get('locked', False)
     shared.set_streamer_locked(locked)
 
 @shared.sio.on("set_context_lock")
-async def handle_set_context_lock(sid, payload: dict):
+async def handle_set_context_lock(payload: dict):
     locked = payload.get('locked', False)
     shared.set_context_locked(locked)
 
-@shared.sio.on("twitch_message")
-async def receive_twitch_message(sid, payload: dict):
+# NOTE: twitch_message handler removed entirely.
+# The hub's catch-all relay automatically forwards it to the UI.
+# The director does not need to re-broadcast it.
+
+
+# --- HUB CONNECTION LOOP ---
+
+async def connect_to_hub():
     """
-    Twitch Service emits twitch_message directly for UI display.
-    Re-broadcast to all other clients (the UI).
+    Continuously attempts to maintain a connection to the Central Hub.
+    Runs as a background task — retries forever if the hub goes down.
     """
-    username = payload.get("username", "Chat")
-    message = payload.get("message", "")
-    if message:
-        await shared.sio.emit("twitch_message", {"username": username, "message": message})
+    while shared.server_ready:
+        if not shared.sio.connected:
+            try:
+                await shared.sio.connect(
+                    config.HUB_URL,
+                    transports=['websocket', 'polling']
+                )
+            except Exception as e:
+                print(f"⚠️ [Director] Hub connection failed: {e}. Retrying in 5s...")
+                await asyncio.sleep(5)
+                continue
+        await asyncio.sleep(2)
+
+
+# --- TICKER RECOVERY WRAPPER ---
 
 async def run_ticker_with_recovery(ticker_func, name: str):
     while shared.server_ready:
@@ -225,57 +257,62 @@ async def run_ticker_with_recovery(ticker_func, name: str):
             if shared.server_ready:
                 print(f"[{name}] Restarting...")
 
+
+# --- SERVER ENTRYPOINT ---
+
 def run_server():
-    global summary_ticker_task, reflex_ticker_task, sensor_bridge_task
-    
+    global summary_ticker_task, reflex_ticker_task, sensor_bridge_task, hub_connection_task
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     shared.ui_event_loop = loop
-    
+
     loop.run_until_complete(llm_analyst.create_http_client())
-    
-    # Start Tickers
+
+    # Start hub connection loop (handles initial connect + reconnects)
+    hub_connection_task = loop.create_task(connect_to_hub())
+
+    # Start tickers
     summary_ticker_task = loop.create_task(
         run_ticker_with_recovery(core_logic.summary_ticker, "SummaryTicker")
     )
     reflex_ticker_task = loop.create_task(
         run_ticker_with_recovery(core_logic.reflex_ticker, "ReflexTicker")
     )
-    
+
     sensor_bridge = SensorBridge(event_callback=core_logic.process_engine_event)
     sensor_bridge_task = loop.create_task(sensor_bridge.run())
-    
+
     shared.server_ready = True
     print("✅ Director Engine is READY")
-    print(f"📡 API endpoints available at http://localhost:{config.DIRECTOR_PORT}/breadcrumbs")
+    print(f"📡 REST API on port {config.DIRECTOR_PORT}")
+    print(f"📡 Connecting to Hub at {config.HUB_URL}")
     print(f"📡 Prompt Service expected at {config.PROMPT_SERVICE_URL}")
-    
+
     server_config = uvicorn.Config(
-        app, 
-        host=config.DIRECTOR_HOST, 
-        port=config.DIRECTOR_PORT, 
-        log_level="warning", 
+        app,
+        host=config.DIRECTOR_HOST,
+        port=config.DIRECTOR_PORT,
+        log_level="warning",
         loop="asyncio",
         timeout_keep_alive=30,
-        ws_ping_interval=20,
-        ws_ping_timeout=20
     )
     server = uvicorn.Server(server_config)
-    
+
     shutdown_event = asyncio.Event()
-    
+
     def signal_handler():
         print("\n⚠️ Shutdown signal received...")
         shared.server_ready = False
         shutdown_event.set()
         server.should_exit = True
-    
+
     for sig in (signal_module.SIGINT, signal_module.SIGTERM):
         try:
             loop.add_signal_handler(sig, signal_handler)
         except NotImplementedError:
             pass
-    
+
     try:
         loop.run_until_complete(server.serve())
     except KeyboardInterrupt:
@@ -284,13 +321,22 @@ def run_server():
     finally:
         print("\n🛑 DIRECTOR ENGINE SHUTDOWN INITIATED")
         shared.server_ready = False
-        
+
+        # Disconnect from hub cleanly
+        if shared.sio.connected:
+            print("  Disconnecting from Hub...")
+            try:
+                loop.run_until_complete(asyncio.wait_for(shared.sio.disconnect(), timeout=3.0))
+            except Exception as e:
+                print(f"  Error disconnecting from hub: {e}")
+
         tasks_to_cancel = [
-            (sensor_bridge_task, "SensorBridge"),
-            (summary_ticker_task, "SummaryTicker"),
-            (reflex_ticker_task, "ReflexTicker")
+            (hub_connection_task,  "HubConnection"),
+            (sensor_bridge_task,   "SensorBridge"),
+            (summary_ticker_task,  "SummaryTicker"),
+            (reflex_ticker_task,   "ReflexTicker"),
         ]
-        
+
         for task, name in tasks_to_cancel:
             if task and not task.done():
                 print(f"  Cancelling {name}...")
@@ -301,25 +347,24 @@ def run_server():
                     pass
                 except Exception as e:
                     print(f"  Error cancelling {name}: {e}")
-        
-        # Cleanup Services
+
         print("  Closing HTTP clients...")
         try:
             loop.run_until_complete(llm_analyst.close_http_client())
         except Exception as e:
             print(f"  Error closing HTTP client: {e}")
-            
+
         print("  Closing prompt client...")
         try:
             loop.run_until_complete(prompt_client.close())
         except Exception as e:
             print(f"  Error closing prompt client: {e}")
-        
+
         print("  Shutting down vision app...")
         process_manager.shutdown_vision_app()
-        
+
         time.sleep(1.0)
-        
+
         try:
             pending = asyncio.all_tasks(loop)
             for task in pending:
@@ -329,8 +374,9 @@ def run_server():
             loop.close()
         except Exception as e:
             print(f"  Error during final cleanup: {e}")
-            
+
         print("✅ SHUTDOWN COMPLETE")
+
 
 if __name__ == "__main__":
     print("🧠 DIRECTOR ENGINE (Brain 1) - Starting...")
