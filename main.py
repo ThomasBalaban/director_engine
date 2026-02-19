@@ -199,6 +199,16 @@ async def handle_set_context_lock(sid, payload: dict):
     locked = payload.get('locked', False)
     shared.set_context_locked(locked)
 
+@shared.sio.on("twitch_message")
+async def receive_twitch_message(sid, payload: dict):
+    """
+    Twitch Service emits twitch_message directly for UI display.
+    Re-broadcast to all other clients (the UI).
+    """
+    username = payload.get("username", "Chat")
+    message = payload.get("message", "")
+    if message:
+        await shared.sio.emit("twitch_message", {"username": username, "message": message})
 
 async def run_ticker_with_recovery(ticker_func, name: str):
     while shared.server_ready:
