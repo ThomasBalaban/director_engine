@@ -88,8 +88,6 @@ async def process_engine_event(
         shared.emit_spoken_word_context(text)
     elif source == config.InputSource.AMBIENT_AUDIO:
         shared.emit_audio_context(text, is_partial=metadata.get("is_partial", False))
-    elif source in [config.InputSource.TWITCH_CHAT, config.InputSource.TWITCH_MENTION]:
-        shared.emit_twitch_message(username or "Chat", text)
     
     # 2. User Profile Update
     if username:
