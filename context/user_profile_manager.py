@@ -1,119 +1,31 @@
-# Save as: director_engine/user_profile_manager.py
-import json
-import os
-import time
-import random
-from typing import Dict, Any, List, Optional
-from config import PROFILES_DIR, DEFAULT_RELATIONSHIP_TIER, DEFAULT_AFFINITY
+import httpx
+from typing import Dict, Any
+
+PROFILE_SERVICE_URL = "http://localhost:8008"
 
 class UserProfileManager:
+    """
+    Synchronous Client Proxy: This perfectly mimics your old class so 
+    core_logic and llm_analyst don't need to be updated with 'await' keywords.
+    """
     def __init__(self):
-        self.profiles_dir = PROFILES_DIR
-        if not os.path.exists(self.profiles_dir):
-            os.makedirs(self.profiles_dir)
-            print(f"[Profiles] Created directory: {self.profiles_dir}")
-
-    def _get_filepath(self, username: str) -> str:
-        safe_username = "".join(c for c in username if c.isalnum() or c in ('-', '_')).lower()
-        return os.path.join(self.profiles_dir, f"{safe_username}.json")
-
+        # Use the synchronous client so it blocks and returns the dictionary immediately
+        self.client = httpx.Client(base_url=PROFILE_SERVICE_URL)
+        
     def get_profile(self, username: str) -> Dict[str, Any]:
-        filepath = self._get_filepath(username)
-        
-        if os.path.exists(filepath):
-            try:
-                with open(filepath, 'r', encoding='utf-8') as f:
-                    profile = json.load(f)
-                    profile['last_seen'] = time.time()
-                    
-                    # Backwards compatibility: Ensure role exists if loading old profile
-                    if 'role' not in profile:
-                        profile['role'] = "handler" if username.lower() == "peepingotter" else "viewer"
-                        
-                    self._save_json(filepath, profile)
-                    return profile
-            except Exception as e:
-                print(f"[Profiles] Error loading profile for {username}: {e}")
-                return self._create_default_profile(username)
-        else:
-            return self._create_default_profile(username)
-
-    def _create_default_profile(self, username: str) -> Dict[str, Any]:
-        print(f"[Profiles] Creating new profile for: {username}")
-        now = time.time()
-        
-        # --- NEURO-FICATION: Identify the Handler ---
-        # The 'Handler' is the owner/creator. They get bullied more.
-        role = "handler" if username.lower() == "peepingotter" else "viewer"
-        
-        profile = {
-            "username": username,
-            "nickname": username,
-            "role": role,  # New Field
-            "is_adult": True, 
-            "created_at": now,
-            "last_seen": now,
-            "relationship": {
-                "tier": DEFAULT_RELATIONSHIP_TIER,
-                "affinity": DEFAULT_AFFINITY,
-                "vibe": "Neutral"
-            },
-            "facts": [],
-            "nami_opinions": []
-        }
-        self._save_json(self._get_filepath(username), profile)
-        return profile
-    
-    def _validate_fact(self, fact_text: str, username: str) -> bool:
-        text = fact_text.lower().strip()
-        username_lower = username.lower()
-        if text == username_lower: return False
-        trivial_phrases = [f"{username_lower} is a new user", f"{username_lower} is a user", "is a viewer"]
-        if any(phrase in text for phrase in trivial_phrases): return False
-        garbage_phrases = ["revealed a new fact", "user revealed", "extracted fact"]
-        if any(phrase in text for phrase in garbage_phrases): return False
-        if len(text) < 5: return False
-        return True
+        try:
+            response = self.client.get(f"/profiles/{username}")
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"[Profile Proxy] ⚠️ Error fetching profile for {username}: {e}")
+            return {}
 
     def update_profile(self, username: str, updates: Dict[str, Any]):
-        profile = self.get_profile(username)
-        modified = False
-
-        if 'new_facts' in updates and updates['new_facts']:
-            for fact in updates['new_facts']:
-                fact = fact.strip()
-                if not self._validate_fact(fact, username):
-                    continue
-
-                if not any(f['content'] == fact for f in profile['facts']):
-                    profile['facts'].append({
-                        "content": fact,
-                        "timestamp": time.time(),
-                        "category": "learned",
-                        "usage_count": 0,      # Track usage for variety
-                        "last_used": 0.0
-                    })
-                    modified = True
-                    print(f"[Profiles] ✅ Added valid fact for {username}: {fact}")
-
-        if 'new_opinion' in updates and updates['new_opinion']:
-            if updates['new_opinion'] not in profile['nami_opinions']:
-                profile['nami_opinions'].append(updates['new_opinion'])
-                modified = True
-
-        if 'affinity_change' in updates:
-            old_aff = profile['relationship']['affinity']
-            profile['relationship']['affinity'] = max(0, min(100, old_aff + updates['affinity_change']))
-            modified = True
-
-        if modified:
-            self._save_json(self._get_filepath(username), profile)
-            return profile
-        return profile
-
-    def _save_json(self, filepath: str, data: Dict[str, Any]):
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
+            self.client.post("/profiles/update", json={
+                "user_id": username, 
+                "data": updates
+            })
         except Exception as e:
-            print(f"[Profiles] Error saving profile: {e}")
+            print(f"[Profile Proxy] ⚠️ Error updating profile for {username}: {e}")
