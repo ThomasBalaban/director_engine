@@ -58,11 +58,29 @@ class PromptConstructor:
         # Get raw event layers
         layers = store.get_all_events_for_summary()
         
-        # Filter for relevant events
+        # --- FIX: Include recent background visuals/audio so peripheral data
+        # doesn't vanish when it ages past the 30s recent window. ---
+        # Only pull high-interest visual/audio events from background to avoid
+        # flooding the prompt with stale chat/system noise.
+        background_periphery = [
+            e for e in layers['background'][-20:]   # look at last 20 background events
+            if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
+            and e.score.interestingness > 0.6
+        ]
+
+        # Filter for relevant events from immediate + recent
         active_events = layers['immediate'] + [
             e for e in layers['recent'] 
             if e.score.interestingness > 0.4 or e.source in [InputSource.TWITCH_MENTION, InputSource.DIRECT_MICROPHONE]
         ]
+
+        # Merge background periphery in at the front (oldest first) so the log
+        # reads chronologically. Deduplicate by event id.
+        seen_ids = {e.id for e in active_events}
+        periphery_to_add = [e for e in background_periphery if e.id not in seen_ids]
+        active_events = periphery_to_add + active_events
+
+        # Sort chronologically
         active_events.sort(key=lambda x: x.timestamp)
         
         # [NEW] Apply detail limits to visuals
