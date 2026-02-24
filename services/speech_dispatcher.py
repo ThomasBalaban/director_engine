@@ -154,12 +154,33 @@ class SpeechDispatcher:
                 )
 
         # --- Priority 2: Internal Thoughts ---
+        # IMPORTANT: Do NOT pass the raw thought text as `content` — that makes
+        # it land verbatim as "USER INPUT" in the final prompt, causing Nami to
+        # respond to her own generated text and creating topic feedback loops
+        # (e.g. One Piece theories snowballing when watching a Phas stream).
+        #
+        # The thought is already stored in the event log and will appear in the
+        # background chat section of the context block. The trigger content
+        # should be a generic instruction so the LLM uses the *context* (which
+        # includes the thought) to inform what it says, rather than treating the
+        # thought as a direct user message to respond to.
         thoughts = [e for e in immediate if e.source == InputSource.INTERNAL_THOUGHT]
         for event in thoughts:
+            # Derive a short, safe instruction from the thought's metadata
+            thought_goal = event.metadata.get("goal", "fill_silence")
+            thought_type = event.metadata.get("type", "shower_thought")
+
+            if thought_type == "callback":
+                instruction = "Reference something that happened earlier in the stream naturally."
+            elif thought_goal == "fill_silence":
+                instruction = "Fill the silence — say something weird, random, or provocative based on what you've been seeing."
+            else:
+                instruction = "React to the current situation based on what you know."
+
             return SpeechDecision(
                 should_speak=True,
                 reason="Internal Thought",
-                content=event.text,
+                content=instruction,
                 priority=0.6,
                 source_info={
                     "source": "DIRECTOR_THOUGHT",

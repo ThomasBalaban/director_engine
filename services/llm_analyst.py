@@ -11,9 +11,10 @@ import json
 import httpx
 import asyncio
 from config import (
-    OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL, 
+    OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL,
     INTERJECTION_THRESHOLD, InputSource,
-    ConversationState, FlowState, UserIntent 
+    ConversationState, FlowState, UserIntent,
+    OWNER_STREAMER_ID
 )
 from context.context_store import ContextStore, EventItem
 from context.user_profile_manager import UserProfileManager
@@ -49,21 +50,57 @@ async def close_http_client():
 
 
 # --- Thought Generation ---
-async def generate_thought(prompt_text: str) -> Optional[str]:
-    if not ollama_client: return None
-    
+
+async def generate_thought(prompt_text: str, stream_context: str = "", watching_context: str = "") -> Optional[str]:
+    """
+    Generates a spontaneous thought for Nami to say during silence.
+
+    Args:
+        prompt_text:       The specific prompt/topic to riff on (e.g. "A weird theory about fire")
+        stream_context:    Short description of what's currently happening on screen
+                           (e.g. "HORROR_TENSION - Otter is creeping through a dark hallway")
+        watching_context:  Pre-built sentence describing the watching relationship
+                           (e.g. "You are watching PeepingOtter stream" or
+                                 "You and PeepingOtter are watching xQc together")
+    """
+    if not ollama_client:
+        return None
+
+    # Build the context block — only include what we have
+    context_lines = []
+    if watching_context:
+        context_lines.append(watching_context)
+    if stream_context:
+        context_lines.append(f"Current situation: {stream_context}")
+
+    context_block = "\n".join(context_lines)
+    if context_block:
+        context_block = f"\n{context_block}\n"
+
     full_prompt = (
-        f"You are Nami's internal monologue (a chaotic, confident AI). "
-        f"Generate a single short sentence based on this thought prompt: '{prompt_text}'.\n"
-        f"Make it sound like a random shower thought, a conspiracy theory, or a sudden realization. "
-        f"Do not ask questions. Be confident but weird."
+        f"You are PeepingNami, often referred to as Nami. "
+        f"You are PeepingOtter's personal AI companion.{context_block}\n"
+        f"You just had a random thought. It could be any of these:\n"
+        f"- A weird or unhinged observation about what is currently happening\n"
+        f"- A question you suddenly became curious about\n"
+        f"- An opinion or hot take on something that just happened\n"
+        f"- Something completely random and chaotic\n"
+        f"- Teasing or prodding PeepingOtter about something\n\n"
+        f"Thought prompt: {prompt_text}\n\n"
+        f"Rules:\n"
+        f"- Say ONE sentence only. Do not explain it.\n"
+        f"- Direct it at PeepingOtter, not at a crowd.\n"
+        f"- Base it on what is actually happening in the current situation above.\n"
+        f"- Do NOT reference anime, fictional universes, games, or any media "
+        f"unless it is explicitly visible in the current situation.\n"
+        f"- Do not start with 'I think' or 'I feel'.\n"
     )
-    
+
     try:
         response = await ollama_client.chat(
             model=OLLAMA_MODEL,
             messages=[{'role': 'user', 'content': full_prompt}],
-            options={"temperature": 0.8, "num_predict": 50}
+            options={"temperature": 0.8, "num_predict": 60}
         )
         return response['message']['content'].strip().strip('"')
     except Exception as e:
@@ -74,23 +111,23 @@ async def generate_thought(prompt_text: str) -> Optional[str]:
 # --- NON-BLOCKING Context Inference ---
 async def _do_context_inference(store: ContextStore) -> Optional[Dict[str, str]]:
     global _context_inference_running, _last_inferred_result
-    
-    if not ollama_client: 
+
+    if not ollama_client:
         return None
-    
+
     try:
         layers = store.get_all_events_for_summary()
-        
-        recent_visuals = [e.text for e in layers['immediate'] + layers['recent'] 
+
+        recent_visuals = [e.text for e in layers['immediate'] + layers['recent']
                           if e.source == InputSource.VISUAL_CHANGE][-5:]
-        recent_audio = [e.text for e in layers['immediate'] + layers['recent'] 
+        recent_audio = [e.text for e in layers['immediate'] + layers['recent']
                         if e.source == InputSource.AMBIENT_AUDIO][-3:]
-        recent_speech = [e.text for e in layers['immediate'] + layers['recent'] 
+        recent_speech = [e.text for e in layers['immediate'] + layers['recent']
                          if e.source in [InputSource.MICROPHONE, InputSource.DIRECT_MICROPHONE]][-3:]
-        
+
         if not recent_visuals and not recent_audio:
             return None
-        
+
         context_block = ""
         if recent_visuals:
             context_block += f"VISUALS: {' | '.join(recent_visuals[:3])}\n"
@@ -98,7 +135,7 @@ async def _do_context_inference(store: ContextStore) -> Optional[Dict[str, str]]
             context_block += f"AUDIO: {' | '.join(recent_audio[:2])}\n"
         if recent_speech:
             context_block += f"SPEECH: {' | '.join(recent_speech[:2])}\n"
-        
+
         prompt = f"""Based on this stream data, identify what game or activity is being shown.
 
 {context_block}
@@ -115,7 +152,7 @@ Rules:
 - Context should describe current activity
 - If unsure, say "Unknown" for game
 """
-        
+
         response = await asyncio.wait_for(
             ollama_client.chat(
                 model=OLLAMA_MODEL,
@@ -124,26 +161,26 @@ Rules:
             ),
             timeout=10.0
         )
-        
+
         result_text = response['message']['content'].strip()
-        
+
         start = result_text.find('{')
         end = result_text.rfind('}') + 1
         if start == -1 or end == 0:
             return None
-            
+
         data = json.loads(result_text[start:end])
-        
+
         game = data.get('game', 'Unknown')
         context = data.get('context', '')
-        
+
         if len(context) > 120:
             context = context[:117] + "..."
-        
+
         result = {"game": game, "context": context}
         _last_inferred_result = result
         return result
-        
+
     except asyncio.TimeoutError:
         print(f"[Analyst] ⏱️ Context inference timed out")
         return None
@@ -156,17 +193,17 @@ Rules:
 
 def start_context_inference_task(store: ContextStore, callback: Callable[[Dict[str, str]], None] = None):
     global _context_inference_running
-    
+
     if _context_inference_running:
         return
-    
+
     _context_inference_running = True
-    
+
     async def _task():
         result = await _do_context_inference(store)
         if result and callback:
             callback(result)
-    
+
     asyncio.create_task(_task())
 
 
@@ -175,7 +212,7 @@ def start_context_inference_task(store: ContextStore, callback: Callable[[Dict[s
 def build_analysis_prompt(text: str, username: str = None) -> str:
     user_instruction = ""
     if username:
-       user_instruction = (
+        user_instruction = (
             f"4. Check if '{username}' explicitly reveals a concrete bio detail (e.g., age, job, pet, location, hobby). "
             f"STRICTLY FORBIDDEN: Facts about the stream itself, 'testing', 'existing', or 'chatting'. "
             f"If the fact is trivial, return an empty list."
@@ -219,12 +256,12 @@ def parse_llm_response(response_text: str) -> Tuple[EventScore | None, str | Non
         end = response_text.rfind('}') + 1
         if start == -1 or end == 0:
             raise json.JSONDecodeError("No JSON object found", response_text, 0)
-            
+
         json_str = response_text[start:end]
         data = json.loads(json_str)
-        
+
         scores_data = data.get("scores", {})
-        
+
         event_score = EventScore(
             interestingness=float(scores_data.get("interestingness", 0.0)),
             urgency=float(scores_data.get("urgency", 0.0)),
@@ -232,7 +269,7 @@ def parse_llm_response(response_text: str) -> Tuple[EventScore | None, str | Non
             emotional_intensity=float(scores_data.get("emotional_intensity", 0.0)),
             topic_relevance=float(scores_data.get("topic_relevance", 0.0))
         )
-        
+
         sentiment = data.get("sentiment")
         sentiment_str = sentiment.strip().lower() if (isinstance(sentiment, str) and sentiment) else None
         summary = data.get("summary")
@@ -248,7 +285,7 @@ def parse_llm_response(response_text: str) -> Tuple[EventScore | None, str | Non
 
 
 async def analyze_and_update_event(
-    event: EventItem, 
+    event: EventItem,
     store: ContextStore,
     profile_manager: UserProfileManager,
     emit_callback: Callable[[EventItem], None] | None = None
@@ -259,7 +296,7 @@ async def analyze_and_update_event(
     target_user = username if event.source in [InputSource.DIRECT_MICROPHONE, InputSource.TWITCH_MENTION] else None
 
     prompt = build_analysis_prompt(event.text, target_user)
-    
+
     try:
         response = await ollama_client.chat(
             model=OLLAMA_MODEL,
@@ -267,9 +304,9 @@ async def analyze_and_update_event(
             options={"temperature": 0.2},
             format='json'
         )
-        
+
         new_score, new_sentiment, summary_str, new_facts = parse_llm_response(response['message']['content'])
-        
+
         score_updated = False
         promoted = False
         profile_updated = False
@@ -279,27 +316,26 @@ async def analyze_and_update_event(
                 store.update_event_score(event.id, new_score)
                 event.score = new_score
                 score_updated = True
-            
+
             should_promote = (
                 new_score.interestingness >= MEMORY_PROMOTION_THRESHOLD or
                 new_score.conversational_value >= 0.75 or
                 new_score.emotional_intensity >= 0.8
             )
-            
+
             if should_promote:
                 store.promote_to_memory(event, summary_text=summary_str)
                 promoted = True
 
-            # High urgency → send interjection request to prompt service
             if new_score.urgency >= INTERJECTION_THRESHOLD:
                 is_interrupt = event.metadata.get('interrupt_priority', False)
                 if not event.metadata.get('is_direct_address'):
                     await trigger_nami_interjection(event, new_score.urgency, is_interrupt=is_interrupt)
 
         if new_sentiment:
-             store.update_event_metadata(event.id, {"sentiment": new_sentiment})
-             event.metadata["sentiment"] = new_sentiment
-             store.update_mood(new_sentiment)
+            store.update_event_metadata(event.id, {"sentiment": new_sentiment})
+            event.metadata["sentiment"] = new_sentiment
+            store.update_mood(new_sentiment)
 
         if target_user and new_facts:
             profile_manager.update_profile(target_user, {'new_facts': new_facts})
@@ -309,18 +345,14 @@ async def analyze_and_update_event(
 
         if (score_updated or promoted or profile_updated) and emit_callback:
             emit_callback(event)
-        
+
     except Exception as e:
         print(f"[Analyst] ERROR: Ollama call failed for event {event.id}: {e}")
 
 
 async def trigger_nami_interjection(event: EventItem, urgency_score: float, is_interrupt: bool = False) -> bool:
-    """
-    Send an interjection request to the PROMPT SERVICE (not directly to Nami).
-    The prompt service will gate it and forward to Nami if appropriate.
-    """
     import services.prompt_client as prompt_client
-    
+
     result = await prompt_client.request_speech(
         trigger=f"urgency_{event.source.name}",
         content=event.text,
@@ -333,7 +365,7 @@ async def trigger_nami_interjection(event: EventItem, urgency_score: float, is_i
             **{k: v for k, v in event.metadata.items() if k not in ['is_direct_address']}
         }
     )
-    
+
     return result.get("delivered", False)
 
 
@@ -355,7 +387,7 @@ def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
 
     immediate_txt = format_layer(layers['immediate']) or "None"
     recent_txt = format_layer(layers['recent']) or "None"
-    background_txt = format_layer(layers['background'][-5:]) or "None" 
+    background_txt = format_layer(layers['background'][-5:]) or "None"
 
     prompt_context = f"""
 [IMMEDIATE EVENTS (Last 10s)]
@@ -367,11 +399,11 @@ def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
 [BACKGROUND CONTEXT (Earlier)]
 {background_txt}
 """
-    
+
     conv_states = ", ".join([s.name for s in ConversationState])
     flow_states = ", ".join([s.name for s in FlowState])
     intent_states = ", ".join([s.name for s in UserIntent])
-    
+
     prompt = f"""
 You are a situation summarizer.
 {prompt_context}
@@ -400,7 +432,7 @@ async def generate_summary(store: ContextStore):
 
     layers = store.get_all_events_for_summary()
     raw_context, full_prompt = build_summary_prompt(layers)
-    
+
     try:
         response = await ollama_client.chat(
             model=OLLAMA_MODEL,
@@ -408,10 +440,10 @@ async def generate_summary(store: ContextStore):
             options={"temperature": 0.3}
         )
         full_response = response['message']['content'].strip()
-        
+
         summary_text = full_response
         prediction_text = "None"
-        
+
         if "[SUMMARY]" in full_response:
             parts = full_response.split("[SUMMARY]")
             if len(parts) > 1:
@@ -420,12 +452,12 @@ async def generate_summary(store: ContextStore):
                     split_pred = remainder.split("[PREDICTION]")
                     summary_text = split_pred[0].strip()
                     remainder = split_pred[1]
-                    
+
                     if "[CLASSIFICATION]" in remainder:
                         split_class = remainder.split("[CLASSIFICATION]")
                         prediction_text = split_class[0].strip()
                         class_block = split_class[1].strip()
-                        
+
                         lines = class_block.split('\n')
                         for line in lines:
                             line = line.strip().upper()
@@ -446,6 +478,6 @@ async def generate_summary(store: ContextStore):
                                 except: pass
 
         store.set_summary(summary_text, raw_context, [], [], prediction_text)
-        
+
     except Exception as e:
         print(f"[Analyst] Summary error: {e}")

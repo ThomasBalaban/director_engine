@@ -22,13 +22,13 @@ class InputSource(Enum):
 SOURCE_WEIGHTS = {
     InputSource.DIRECT_MICROPHONE: 0.8,
     InputSource.TWITCH_MENTION: 0.8,
-    InputSource.AMBIENT_AUDIO: 0.7,      # INCREASED: Listen to game audio
-    InputSource.VISUAL_CHANGE: 0.95,     # MAXED: Vision is primary
+    InputSource.AMBIENT_AUDIO: 0.7,
+    InputSource.VISUAL_CHANGE: 0.95,
     InputSource.TWITCH_CHAT: 0.3,
     InputSource.MICROPHONE: 0.5,
     InputSource.BOT_TWITCH_REPLY: 0.0,
     InputSource.SYSTEM_PATTERN: 0.95,
-    InputSource.INTERNAL_THOUGHT: 0.95   # MAXED: Thoughts must be voiced
+    InputSource.INTERNAL_THOUGHT: 0.95
 }
 
 class ConversationState(Enum):
@@ -70,36 +70,42 @@ class SceneType(Enum):
     COMEDY_MOMENT = "Funny / Meme / Laughter"
     TECHNICAL_DOWNTIME = "Loading / Tech Issues"
 
+# --- Identity ---
+# The Twitch username of the bot's owner.
+# Used to determine whether Nami is watching her owner stream,
+# or watching a third-party stream alongside her owner.
+OWNER_STREAMER_ID = "peepingotter"
+
 # --- Energy System Config ---
 ENERGY_MAX = 100.0
-ENERGY_REGEN_PER_SEC = 5.0       # INCREASED: Unlimited yapping
-ENERGY_COST_INTERJECTION = 5.0   # LOWERED: Very cheap to speak
+ENERGY_REGEN_PER_SEC = 5.0
+ENERGY_COST_INTERJECTION = 5.0
 ENERGY_COST_REPLY = 5.0
 ENERGY_COST_PATTERN = 5.0
 
 # --- Memory & Proactivity Config ---
-MEMORY_DECAY_RATE = 0.05 
+MEMORY_DECAY_RATE = 0.05
 MEMORY_RETRIEVAL_LIMIT = 5
-CURIOSITY_INTERVAL = 10.0        # Fill silence after ~10s of nothing
-CALLBACK_INTERVAL = 45.0 
-COMPRESSION_INTERVAL = 30.0 
-POST_SPEECH_COOLDOWN = 5.0       # Brief breather after speaking (anti machine-gun)
+CURIOSITY_INTERVAL = 10.0
+CALLBACK_INTERVAL = 45.0
+COMPRESSION_INTERVAL = 30.0
+POST_SPEECH_COOLDOWN = 5.0
 
 # --- Director Config ---
 DIRECTOR_PORT = 8006
-HUB_URL = "http://localhost:8002" 
+HUB_URL = "http://localhost:8002"
 DIRECTOR_HOST = "0.0.0.0"
 WINDOW_IMMEDIATE = 10.0
 WINDOW_RECENT = 30.0
-WINDOW_BACKGROUND = 300.0 
+WINDOW_BACKGROUND = 300.0
 SUMMARY_INTERVAL_SECONDS = 5.0
 INTERJECTION_THRESHOLD = 0.75
 NAMI_INTERJECT_URL = "http://localhost:8000/funnel/interject"
-MEMORY_THRESHOLD = 0.85 
+MEMORY_THRESHOLD = 0.85
 PRIMARY_MEMORY_COUNT = 5
 VALID_MOODS = ["Neutral", "Happy", "Annoyed", "Scared", "Horny", "Tired"]
 DEFAULT_MOOD = "Neutral"
-MOOD_WINDOW_SIZE = 5 
+MOOD_WINDOW_SIZE = 5
 OLLAMA_TRIGGER_THRESHOLD = 0.5
 OLLAMA_MODEL = 'llama3.2:latest'
 OLLAMA_HOST = 'http://localhost:11434'
