@@ -215,8 +215,8 @@ class PromptConstructor:
             
             # --- FORMATTING ---
             line_str = ""
-            if e.source == InputSource.DIRECT_MICROPHONE:
-                line_str = f"[🎤 USER SAID] {e.text}"
+            if e.source in [InputSource.DIRECT_MICROPHONE, InputSource.MICROPHONE]:
+                line_str = f"[🎤 PeepingOtter] {e.text}"
             elif e.source == InputSource.AMBIENT_AUDIO:
                 line_str = f"[AMBIENT_AUDIO] {e.text}"
             elif e.source in [InputSource.TWITCH_MENTION, InputSource.TWITCH_CHAT]:

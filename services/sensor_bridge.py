@@ -51,6 +51,15 @@ class SensorBridge:
         async def handle_audio_context(payload: dict):
             await self._parse_whisper_content(payload)
 
+        @shared.sio.on("spoken_word_context")
+        async def handle_spoken_word_context(payload: dict):
+            # Mic transcription — force source to "microphone" so _parse_whisper_content
+            # routes it to DIRECT_MICROPHONE (if "nami" heard) or MICROPHONE, never AMBIENT_AUDIO.
+            if "metadata" not in payload:
+                payload = {**payload, "metadata": {}}
+            payload["metadata"]["source"] = "microphone"
+            await self._parse_whisper_content(payload)
+
         @shared.sio.on("event")
         async def ingest_event(payload: dict):
             try:
@@ -87,7 +96,7 @@ class SensorBridge:
         metadata = data.get("metadata", {})
         source_str = metadata.get("source", data.get("source", "desktop"))
         
-        # Only interrupt current thought if "nami" is specifically mentioned
+        # Route mic audio correctly — never let it fall through to AMBIENT_AUDIO
         if source_str == "microphone":
             if "nami" in text.lower():
                 source = InputSource.DIRECT_MICROPHONE
