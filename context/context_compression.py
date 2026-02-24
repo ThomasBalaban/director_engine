@@ -97,6 +97,11 @@ class ContextCompressor:
                 narrative = narrative[1:-1]
             if narrative.startswith("'") and narrative.endswith("'"):
                 narrative = narrative[1:-1]
+
+            if "\nNote:" in narrative:
+                narrative = narrative.split("\nNote:")[0].strip()
+            if narrative.lower().startswith("note:"):
+                narrative = "" 
                 
             if narrative and len(narrative) > 10:
                 store.add_narrative_segment(narrative)

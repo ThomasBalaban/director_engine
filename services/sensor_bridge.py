@@ -81,7 +81,6 @@ class SensorBridge:
                 if active_thread:
                     resolves = "?" not in reply_text
                     shared.store.thread_manager.track_nami_response(text=reply_text, resolves_thread=resolves)
-                shared.emit_bot_reply(reply_text, payload.get('prompt', ''), payload.get('is_censored', False))
                 asyncio.create_task(prompt_client.notify_bot_response())
             except Exception as e: 
                 print(f"⚠️ [SensorBridge] Error handling bot_reply: {e}")

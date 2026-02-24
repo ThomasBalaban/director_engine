@@ -80,14 +80,7 @@ async def process_engine_event(
     if is_direct_address:
         # Tell prompt service: user spoke, clear awaiting state
         asyncio.create_task(prompt_client.notify_user_responded())
-    
-    # 1. UI Emit
-    if source == config.InputSource.VISUAL_CHANGE:
-        shared.emit_vision_context(text)
-    elif source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
-        shared.emit_spoken_word_context(text)
-    elif source == config.InputSource.AMBIENT_AUDIO:
-        shared.emit_audio_context(text, is_partial=metadata.get("is_partial", False))
+
     
     # 2. User Profile Update
     if username:
