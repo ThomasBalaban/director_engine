@@ -11,7 +11,7 @@ import json
 import httpx
 import asyncio
 from config import (
-    OLLAMA_MODEL, OLLAMA_HOST, NAMI_INTERJECT_URL,
+    OLLAMA_MODEL, OLLAMA_HOST,
     INTERJECTION_THRESHOLD, InputSource,
     ConversationState, FlowState, UserIntent,
     OWNER_STREAMER_ID

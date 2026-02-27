@@ -124,27 +124,6 @@ def _emit_threadsafe(event: str, data: dict):
         if server_ready:
             print(f"⚠️ UI Emit Error ({event}): {type(e).__name__}: {e}")
 
-def emit_vision_context(context): 
-    _emit_threadsafe('vision_context', {'context': context})
-
-def emit_spoken_word_context(context): 
-    _emit_threadsafe('spoken_word_context', {'context': context})
-
-def emit_audio_context(context, is_partial=False): 
-    _emit_threadsafe('audio_context', {'context': context, 'is_partial': is_partial})
-
-def emit_twitch_message(username, message): 
-    _emit_threadsafe('twitch_message', {'username': username, 'message': message})
-
-def emit_bot_reply(reply, prompt="", is_censored=False, censorship_reason=None, filtered_area=None): 
-    _emit_threadsafe('bot_reply', {
-        'reply': reply, 
-        'prompt': prompt, 
-        'is_censored': is_censored, 
-        'censorship_reason': censorship_reason,
-        'filtered_area': filtered_area 
-    })
-
 def emit_event_scored(event: EventItem):
     _emit_threadsafe('event_scored', {
         'score': event.score.interestingness, 
