@@ -1,6 +1,7 @@
 # director_engine/main.py
 import uvicorn
 import asyncio
+import uuid
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import Optional
@@ -14,7 +15,7 @@ app = FastAPI(title="Nami Director Engine")
 
 # Initialize the SensorBridge so it hooks up to the shared.sio Hub connection
 sensor_bridge = SensorBridge()
-
+pending_memory_requests = {}
 
 # --- Request Models ---
 
@@ -142,6 +143,38 @@ async def memory_stats():
             ]
         }
 
+
+@sio.on('memory_results')
+def on_memory_results(data):
+    """Catches the reply from the memory_service."""
+    req_id = data.get('request_id')
+    if req_id in pending_memory_requests:
+        # Resolve the future with the returned memories
+        pending_memory_requests[req_id].set_result(data.get('memories', []))
+
+async def fetch_memories_for_prompt(query_text: str, limit: int = 5) -> list:
+    """Helper to ask the memory service for context and await the reply."""
+    req_id = str(uuid.uuid4())
+    loop = asyncio.get_event_loop()
+    future = loop.create_future()
+    pending_memory_requests[req_id] = future
+    
+    # Send the request to the Hub
+    await sio.emit('query_memories', {
+        'request_id': req_id, 
+        'query': query_text, 
+        'limit': limit
+    })
+    
+    try:
+        # Wait up to 2.5 seconds for the memory_service to reply
+        results = await asyncio.wait_for(future, timeout=2.5)
+        return results
+    except asyncio.TimeoutError:
+        print("⚠️ [Memory] Query timed out. Memory service might be offline.")
+        return []
+    finally:
+        pending_memory_requests.pop(req_id, None)
 
 @app.get("/store_stats")
 async def store_stats():

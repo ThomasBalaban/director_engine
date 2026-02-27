@@ -164,10 +164,17 @@ class ContextStore:
 
     def promote_to_memory(self, event: EventItem, summary_text: str = None):
         with self.lock:
-            if any(m.id == event.id for m in self.all_memories): return
             event.memory_text = summary_text if summary_text else event.text
-            print(f"💾 [Memory] Archiving: {event.memory_text[:50]}...")
-            self.all_memories.append(event)
+            print(f"💾 [Memory] Flagged for remote storage: {event.memory_text[:50]}...")
+            
+            # Queue it up for the main loop to emit via Socket.IO
+            self.pending_memories_to_save.append({
+                "id": event.id,
+                "timestamp": event.timestamp,
+                "text": event.text,
+                "memory_text": event.memory_text,
+                "importance": event.score.interestingness
+            })
 
     def update_mood(self, sentiment: str):
         if not sentiment: return

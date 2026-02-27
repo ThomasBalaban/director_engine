@@ -48,7 +48,7 @@ class PromptConstructor:
     async def construct_context_block(self, 
                           store: ContextStore, 
                           directive: Directive, 
-                          memories: List[EventItem]) -> str:
+                          memories: List[Dict[str, Any]]) -> str:
         import shared
         
         # [NEW] Determine detail level
@@ -263,10 +263,7 @@ class PromptConstructor:
             f"Known Facts:\n{facts_str}"
         )
 
-    def _format_memories(self, memories: List[EventItem], narrative_log: List[str], ancient_log: List[str] = None) -> str:
-        """
-        Format memories and narrative history for the context block.
-        """
+    def _format_memories(self, memories: List[Dict[str, Any]], narrative_log: List[str], ancient_log: List[str] = None) -> str:
         has_memories = memories and len(memories) > 0
         has_narrative = narrative_log and len(narrative_log) > 0
         has_ancient = ancient_log and len(ancient_log) > 0
@@ -292,7 +289,8 @@ class PromptConstructor:
         if has_memories:
             text += "\n[Related Moments]\n"
             for mem in memories[:3]:
-                content = mem.memory_text or mem.text
+                # NEW: Access as dictionary
+                content = mem.get('memory_text') or mem.get('text', '')
                 if len(content) > 150:
                     content = content[:147] + "..."
                 text += f"• {content}\n"
