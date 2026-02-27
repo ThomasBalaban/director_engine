@@ -19,7 +19,6 @@ from systems.adaptive_controller import AdaptiveController
 from systems.correlation_engine import CorrelationEngine
 from systems.energy_system import EnergySystem
 from systems.behavior_engine import BehaviorEngine
-from context.memory_ops import MemoryOptimizer
 from context.context_compression import ContextCompressor
 from systems.scene_manager import SceneManager
 from systems.decision_engine import DecisionEngine
@@ -93,7 +92,6 @@ adaptive_ctrl = AdaptiveController()
 correlation_engine = CorrelationEngine()
 energy_system = EnergySystem()
 behavior_engine = BehaviorEngine()
-memory_optimizer = MemoryOptimizer()
 context_compressor = ContextCompressor()
 scene_manager = SceneManager()
 decision_engine = DecisionEngine()

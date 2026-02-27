@@ -74,11 +74,14 @@ async def get_context(payload: ContextRequest = ContextRequest()):
     summary_data = shared.store.get_summary_data()
     memory_query = core_logic.build_smart_memory_query(shared.store, summary_data)
 
-    smart_memories = shared.memory_optimizer.retrieve_relevant_memories(
-        shared.store,
-        memory_query,
-        limit=5
-    )
+    # --- NEW: Flush pending memories to the Hub before we query ---
+    if hasattr(shared.store, 'pending_memories_to_save') and shared.store.pending_memories_to_save:
+        for mem in shared.store.pending_memories_to_save:
+            await shared.sio.emit('save_memory', mem)
+        shared.store.pending_memories_to_save.clear()
+
+    # --- NEW: Fetch memories from the microservice instead of locally ---
+    smart_memories = await fetch_memories_for_prompt(memory_query, limit=5)
 
     try:
         context_block = await shared.prompt_constructor.construct_context_block(
@@ -127,24 +130,31 @@ async def thread_stats():
 @app.get("/memory_stats")
 async def memory_stats():
     """Debug endpoint to inspect memory store state."""
+    
+    # 1. Ask the microservice for the top 5 memories. 
+    # (Sending an empty query triggers it to just return the highest importance ones)
+    top_memories = await fetch_memories_for_prompt("", limit=5)
+    
     with shared.store.lock:
-        memories = shared.store.all_memories
         return {
-            "total_memories": len(memories),
+            "total_memories": "Managed by Memory Service",
             "narrative_log_count": len(shared.store.narrative_log),
             "ancient_history_count": len(shared.store.ancient_history_log),
+            "pending_saves": len(getattr(shared.store, 'pending_memories_to_save', [])),
+            
+            # 2. Format them exactly how the UI expects them!
             "top_memories": [
                 {
-                    "text": (m.memory_text or m.text)[:80],
-                    "score": round(m.score.interestingness, 3),
-                    "source": m.source.name,
+                    "text": (m.get('memory_text') or m.get('text', ''))[:80],
+                    "score": round(m.get('importance', 0), 3),
+                    "source": "memory_service",
                 }
-                for m in sorted(memories, key=lambda x: x.score.interestingness, reverse=True)[:5]
+                for m in top_memories
             ]
         }
 
 
-@sio.on('memory_results')
+@shared.sio.on('memory_results')
 def on_memory_results(data):
     """Catches the reply from the memory_service."""
     req_id = data.get('request_id')
@@ -160,7 +170,7 @@ async def fetch_memories_for_prompt(query_text: str, limit: int = 5) -> list:
     pending_memory_requests[req_id] = future
     
     # Send the request to the Hub
-    await sio.emit('query_memories', {
+    await shared.sio.emit('query_memories', {
         'request_id': req_id, 
         'query': query_text, 
         'limit': limit
@@ -184,7 +194,6 @@ async def store_stats():
         "immediate": len(layers["immediate"]),
         "recent": len(layers["recent"]),
         "background": len(layers["background"]),
-        "all_memories": len(shared.store.all_memories),
         "narrative_log": len(shared.store.narrative_log),
         "ancient_history": len(shared.store.ancient_history_log),
         "current_mood": shared.store.current_mood,

@@ -359,7 +359,6 @@ async def summary_ticker():
                 sys_event = shared.store.add_event(config.InputSource.SYSTEM_PATTERN, pat['text'], pat['metadata'], pat['score'])
                 shared.emit_event_scored(sys_event)
 
-            shared.memory_optimizer.decay_memories(shared.store)
             await shared.context_compressor.run_compression_cycle(shared.store)
 
             summary_data = shared.store.get_summary_data()
