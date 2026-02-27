@@ -42,7 +42,7 @@ class StructuredPromptFormatter:
         directive: Optional[Directive],
         store: ContextStore,
         events: List[EventItem],
-        memories: List[EventItem],
+        memories: List[Dict[str, Any]],
         visual_summary: str,
         conversation_log: str,
         user_is_speaking: bool,
@@ -203,10 +203,10 @@ class StructuredPromptFormatter:
   <role>{role}</role>
   <relationship tier="{tier}" affinity="{affinity}%"/>{facts_list}{role_context}
 </active_user>"""
-    
+
     def _format_memories(
         self, 
-        memories: List[EventItem], 
+        memories: List[Dict[str, Any]], 
         store: ContextStore
     ) -> str:
         """Format memories with callback hints."""
@@ -234,7 +234,8 @@ class StructuredPromptFormatter:
         if memories:
             lines.append("  <relevant_moments>")
             for mem in memories[:3]:  # Top 3
-                content = mem.memory_text or mem.text
+                # NEW: Safely get the text out of the dictionary
+                content = mem.get('memory_text') or mem.get('text', '')
                 clean = self._clean_text(content)
                 
                 # Add callback hint
@@ -252,10 +253,34 @@ class StructuredPromptFormatter:
   <instruction>Reference these naturally when relevant, don't force it</instruction>
 {content}
 </callback_material>"""
-    
-    def _generate_callback_hint(self, mem: EventItem, store: ContextStore) -> Optional[str]:
+
+    def _generate_callback_hint(self, mem: Dict[str, Any], store: ContextStore) -> Optional[str]:
         """Suggest when to bring up a memory."""
-        text = (mem.memory_text or mem.text).lower()
+        # NEW: Safely get the text out of the dictionary
+        text = (mem.get('memory_text') or mem.get('text', '')).lower()
+        
+        # Pattern matching for callback opportunities
+        if any(word in text for word in ["died", "failed", "lost", "game over"]):
+            return "Use when: User fails again / Skill issue"
+        
+        elif any(word in text for word in ["won", "beat", "victory", "success"]):
+            return "Use when: User wins / Celebrating"
+        
+        elif "chat" in text and any(word in text for word in ["said", "asked", "told"]):
+            return "Use when: Similar chat interaction"
+        
+        elif store.current_scene.name.lower() in text:
+            return "Use when: Same scene/game"
+        
+        elif any(word in text for word in ["funny", "laugh", "joke"]):
+            return "Use when: Comedy moment"
+        
+        return None
+
+
+    def _generate_callback_hint(self, mem: Dict[str, Any], store: ContextStore) -> Optional[str]:
+        """Suggest when to bring up a memory."""
+        text = (mem.get('memory_text') or mem.get('text', '')).lower()
         
         # Pattern matching for callback opportunities
         if any(word in text for word in ["died", "failed", "lost", "game over"]):

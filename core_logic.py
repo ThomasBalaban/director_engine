@@ -359,30 +359,17 @@ async def summary_ticker():
                 sys_event = shared.store.add_event(config.InputSource.SYSTEM_PATTERN, pat['text'], pat['metadata'], pat['score'])
                 shared.emit_event_scored(sys_event)
 
-            await shared.context_compressor.run_compression_cycle(shared.store)
-
-            summary_data = shared.store.get_summary_data()
-            current_query = build_smart_memory_query(shared.store, summary_data)
-
-            print(f"🧠 [Memory] Query: '{current_query[:60]}...' " if len(current_query) > 60 else f"🧠 [Memory] Query: '{current_query}'")
-            print(f"🧠 [Memory] Total memories in store: {len(shared.store.all_memories)}")
-
-            smart_memories = shared.memory_optimizer.retrieve_relevant_memories(shared.store, current_query, limit=5)
+            # --- DELETED LOCAL MEMORY DECAY & RETRIEVAL ---
+            # Decay is now handled by the Memory Service microservice!
             
-            print(f"🧠 [Memory] Retrieved {len(smart_memories)} relevant memories")
-            for i, m in enumerate(smart_memories[:3]):
-                content = m.memory_text or m.text
-                print(f"   {i+1}. [{m.source.name}] {content[:50]}... (score: {m.score.interestingness:.2f})")
+            await shared.context_compressor.run_compression_cycle(shared.store)
+            summary_data = shared.store.get_summary_data()
 
-            memories_list = [
-                {
-                    "source": m.source.name, 
-                    "text": m.memory_text or m.text, 
-                    "score": round(m.score.interestingness, 2), 
-                    "type": "memory"
-                } for m in smart_memories
-            ]
+            print(f"🧠 [Memory] Pending saves to Hub: {len(getattr(shared.store, 'pending_memories_to_save', []))}")
 
+            # Prepare narrative history for the UI dashboard
+            # (The actual long-term memories are fetched via the /memory_stats endpoint)
+            memories_list = []
             if shared.store.narrative_log:
                 for i, story in enumerate(reversed(shared.store.narrative_log[-3:])):
                     memories_list.insert(i, {
