@@ -102,7 +102,6 @@ async def process_engine_event(
     if source == config.InputSource.BOT_TWITCH_REPLY:
         zero_score = EventScore()
         shared.store.add_event(source, text, metadata, zero_score)
-        shared.emit_twitch_message(username or "Nami", text)
         shared.behavior_engine.register_bot_action(shared.store, text)
         shared.energy_system.spend(config.ENERGY_COST_REPLY)
         return
