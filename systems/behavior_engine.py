@@ -4,7 +4,7 @@ import random
 import asyncio
 from typing import List, Optional
 from config import (
-    BotGoal, InputSource, ConversationState, FlowState,
+    BotGoal, InputSource, ConversationState, FlowState, SceneType,
     CURIOSITY_INTERVAL, CALLBACK_INTERVAL, OWNER_STREAMER_ID
 )
 from context.context_store import ContextStore, EventItem
@@ -21,6 +21,13 @@ class BehaviorEngine:
         self.attention_lock_duration = 5.0
 
     def update_goal(self, store: ContextStore):
+        # Scene override: if Otter is quiet and game is busy, lock OBSERVE.
+        # HOST_LOW_ENERGY does NOT override — we want the existing
+        # INVESTIGATE/TROLL chaos to fire when there's room to fill.
+        if store.current_scene == SceneType.HOST_FOCUSED_QUIET:
+            self.current_goal = BotGoal.OBSERVE
+            return
+
         chat_vel, stream_energy = store.get_activity_metrics()
         state = store.current_conversation_state
         if state == ConversationState.FRUSTRATED: self.current_goal = BotGoal.SUPPORT
@@ -97,7 +104,17 @@ class BehaviorEngine:
         universes — it stays anchored to the real situation on screen.
         """
         now = time.time()
-        if now - self.last_curiosity_check < CURIOSITY_INTERVAL:
+
+        # Scene-aware gating:
+        #   HOST_FOCUSED_QUIET → don't pull focus; suppress idle thoughts entirely.
+        #   HOST_LOW_ENERGY    → fill the dead air more aggressively (½ interval).
+        if store.current_scene == SceneType.HOST_FOCUSED_QUIET:
+            return None
+        interval = CURIOSITY_INTERVAL
+        if store.current_scene == SceneType.HOST_LOW_ENERGY:
+            interval = CURIOSITY_INTERVAL * 0.5
+
+        if now - self.last_curiosity_check < interval:
             return None
 
         import shared

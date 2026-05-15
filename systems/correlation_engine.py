@@ -6,14 +6,44 @@ from context.context_store import ContextStore
 from config import InputSource
 from scoring import EventScore
 
+# Article-anchored noun extraction — vision descriptions almost always say
+# "a person", "the monitor", "an animal", so this catches real subjects
+# instead of whatever word happens to appear first.
+_ARTICLE_NOUN_RE = re.compile(r"\b(?:a|an|the)\s+([a-z][a-z\-]{2,})\b", re.IGNORECASE)
+
+# Words that look noun-ish after an article but are streaming-room boilerplate
+# or framing-language. Anything in here is excluded from fixation candidates.
+_FIXATION_STOPWORDS = {
+    # Framing / vision-narrator artifacts
+    "frame", "frames", "image", "scene", "shot", "view", "clip", "video",
+    "background", "foreground", "left", "right", "center", "top", "bottom",
+    "side", "edge", "corner", "moment", "second", "while", "bit", "couple",
+    "few", "lot", "way", "thing", "things", "kind", "type", "sort", "part",
+    "set", "piece", "area", "place",
+    # Streaming-room boilerplate (almost always present, not actually fixating)
+    "person", "people", "man", "woman", "guy", "character", "streamer", "user",
+    "screen", "monitor", "monitors", "display", "computer", "keyboard",
+    "mouse", "desk", "chair", "room", "light", "lighting", "ring",
+    "camera", "webcam", "microphone",
+}
+
+# How many *distinct* recent frames a noun must appear in before it counts.
+_FIXATION_MIN_FRAMES = 4
+# Fraction of the recent window the noun must cover (caps lock-in on
+# permanent fixtures like the streamer).
+_FIXATION_MIN_COVERAGE = 0.6
+# Don't re-fire the same fixation within this many seconds.
+_FIXATION_REFIRE_COOLDOWN = 60.0
+
+
 class CorrelationEngine:
     def __init__(self):
         self.tilt_level = 0.0
         self.last_pattern_time = 0
         self.cooldown = 15.0  # Increased cooldown to prevent spam
-        self.fixation_counter = {} # {entity_name: count}
+        self.last_fixation_fired: Dict[str, float] = {}  # entity -> last fire time
         self.last_fixation_check = 0
-        
+
     def _calculate_momentum(self, history: List[str]) -> str:
         if len(history) < 3: return "Stable"
         
@@ -30,63 +60,63 @@ class CorrelationEngine:
         if delta <= -2: return "Escalating_Negative"
         return "Stable"
 
-    def _extract_subject(self, text: str) -> str:
-        """
-        Simple heuristic to extract the main noun from a vision description.
-        E.g., "A floating machine with a red hue" -> "machine"
-        """
-        ignore = ["landscape", "screen", "image", "frame", "text", "background", "shot"]
-        
-        # Clean up
-        clean = text.lower().replace(".", "")
-        words = clean.split()
-        
-        # Heuristic: Take the first significant noun
-        # (A real implementation might use NLP, but this works for "A [noun]...")
-        for word in words:
-            if len(word) > 3 and word not in ["with", "from", "that", "this", "looking", "surrounding"] and word not in ignore:
-                return word
-        return "thing"
-        
+    def _extract_frame_nouns(self, text: str) -> set:
+        """Pull noun candidates that follow 'a/an/the' — one per frame, dedup'd."""
+        nouns = set()
+        for m in _ARTICLE_NOUN_RE.finditer(text):
+            noun = m.group(1).lower()
+            if len(noun) >= 4 and noun not in _FIXATION_STOPWORDS:
+                nouns.add(noun)
+        return nouns
+
     def check_visual_fixations(self, store: ContextStore) -> List[Dict[str, Any]]:
         """
-        [NEURO-FICATION] Checks for recurring visual entities (Gymbag effect).
+        Detect recurring visual entities (Gymbag effect).
+
+        Counts how many *distinct* recent frames mention each candidate noun.
+        A fixation requires both an absolute floor (>= _FIXATION_MIN_FRAMES) and
+        a coverage ratio (>= _FIXATION_MIN_COVERAGE of recent frames) so that
+        always-on fixtures don't dominate and one-off framing words don't fire.
         """
         now = time.time()
-        # Only check every 10s
-        if now - self.last_fixation_check < 10.0: return []
+        if now - self.last_fixation_check < 10.0:
+            return []
         self.last_fixation_check = now
-        
-        patterns = []
-        
-        # Get raw vision text from recent history (last 30s)
+
         recent_visuals = [e.text for e in store.recent if e.source == InputSource.VISUAL_CHANGE]
-        
-        # Decay old counters
-        for entity in list(self.fixation_counter.keys()):
-            self.fixation_counter[entity] *= 0.7
-            if self.fixation_counter[entity] < 0.5:
-                del self.fixation_counter[entity]
-                
-        # Count new entities
+        if len(recent_visuals) < _FIXATION_MIN_FRAMES:
+            return []
+
+        frames_per_noun: Dict[str, int] = {}
         for desc in recent_visuals:
-            subject = self._extract_subject(desc)
-            if subject != "thing":
-                self.fixation_counter[subject] = self.fixation_counter.get(subject, 0) + 1
-            
-            # If an entity appears often (Neuro's "Gymbag")
-            if self.fixation_counter.get(subject, 0) > 3.0:
-                print(f"👁️ [Fixation] Obsessing over: {subject}")
-                patterns.append({
-                    "text": f"Visual Fixation: I keep seeing a {subject}.",
-                    "score": EventScore(interestingness=0.9, urgency=0.7, conversational_value=1.0),
-                    "metadata": {"type": "fixation", "entity": subject}
-                })
-                # Reset slightly to allow re-triggering later but not immediately
-                self.fixation_counter[subject] = 1.0 
-                return patterns # Only return one fixation at a time
-                
-        return patterns
+            for noun in self._extract_frame_nouns(desc):
+                frames_per_noun[noun] = frames_per_noun.get(noun, 0) + 1
+
+        if not frames_per_noun:
+            return []
+
+        coverage_threshold = max(
+            _FIXATION_MIN_FRAMES,
+            int(len(recent_visuals) * _FIXATION_MIN_COVERAGE),
+        )
+        candidates = [(n, c) for n, c in frames_per_noun.items() if c >= coverage_threshold]
+        if not candidates:
+            return []
+
+        # Pick the strongest recurrence; respect per-entity refire cooldown
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        for entity, count in candidates:
+            if now - self.last_fixation_fired.get(entity, 0.0) < _FIXATION_REFIRE_COOLDOWN:
+                continue
+            self.last_fixation_fired[entity] = now
+            print(f"👁️ [Fixation] Obsessing over: {entity} ({count}/{len(recent_visuals)} frames)")
+            return [{
+                "text": f"Visual Fixation: I keep seeing a {entity}.",
+                "score": EventScore(interestingness=0.9, urgency=0.7, conversational_value=1.0),
+                "metadata": {"type": "fixation", "entity": entity},
+            }]
+
+        return []
 
     def correlate(self, store: ContextStore) -> List[Dict[str, Any]]:
         now = time.time()

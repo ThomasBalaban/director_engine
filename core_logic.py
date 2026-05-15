@@ -196,6 +196,7 @@ async def reflex_ticker():
     
     while True:
         try:
+            shared.store.update_host_state()
             shared.behavior_engine.update_goal(shared.store)
             chat_vel, energy_level = shared.store.get_activity_metrics()
             shared.adaptive_ctrl.update(chat_vel, energy_level)

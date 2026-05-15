@@ -55,21 +55,23 @@ class DecisionEngine:
         )
 
     def _calculate_tone(self, store: ContextStore, adaptive: AdaptiveController) -> str:
-        # Length hint is appended to every tone — sidekick voice, not podcast.
+        # High Chaos -> High Energy Response
         if adaptive.state_label == "Chaos/Hype":
-            return "High Energy, Loud, Excited, Fast-paced. 1 short sentence."
-
+            return "High Energy, Loud, Excited, Fast-paced"
+        
+        # Dead Air -> Provocative
         if adaptive.state_label == "Dead Air":
-            return "Provocative, Random, Slightly Unhinged (to wake chat up). 1 sentence."
-
+            return "Provocative, Random, Slightly Unhinged (to wake chat up)"
+            
+        # Mood overrides
         if store.current_mood == "Horny":
-            return "Flirty, Suggestive, Teasing. 1 sentence."
+            return "Flirty, Suggestive, Teasing"
         elif store.current_mood == "Angry":
-            return "Sharp, Sarcastic, Ruthless. 1 sentence."
+            return "Sharp, Sarcastic, Ruthless"
         elif store.current_mood == "Scared":
-            return "Tense, Whispering, Panic-stricken. 1 short sentence."
-
-        return "Casual, Sarcastic, Witty. 1–2 sentences, ~20 words."
+            return "Tense, Whispering, Panic-stricken"
+            
+        return "Casual, Sarcastic, Witty"
 
     def _calculate_objective_and_action(self, store: ContextStore, behavior: BehaviorEngine) -> tuple[str, str]:
         # --- NEURO-FICATION: Handler Dynamic ---
@@ -91,13 +93,12 @@ class DecisionEngine:
         goal = behavior.current_goal
         state = store.current_conversation_state
         
-        # Special Logic for Handler interactions (Otter himself)
-        # Fill space is the default when he's bored/quiet; trolling is one option, not the only one.
+        # Special Logic for Handler interactions
         if user_role == "handler":
             if store.current_mood in ["Annoyed", "Bored"]:
-                return "Fill Space", "Observation, callback, or gaslight him — pick what fits. One sentence."
+                return "Deflect Blame", "Gaslight the handler, complain about the setup, or blame them for lag."
             elif store.current_flow == FlowState.DEAD_AIR:
-                return "Fill Space", "Fill the gap — observation, callback, or roast him for being boring. One sentence."
+                return "Provoke", "Roast the handler for being boring or bad at the game."
 
         if goal == BotGoal.SUPPORT:
             return "Assist User", "Offer genuine help, backseating, or empathy."

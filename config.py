@@ -1,12 +1,28 @@
 # Save as: director_engine/config.py
+import os
 from enum import Enum, auto
+from pathlib import Path
 
-# --- NEW: Import API Key ---
-try:
-    from private_key import GEMINI_API_KEY
-except ImportError:
-    GEMINI_API_KEY = None
-    print("⚠️ Warning: private_key.py not found. Visual summarization will be disabled.")
+
+def _load_sibling_secrets() -> None:
+    secrets_dir = Path(__file__).resolve().parent.parent / "director_ui" / "secrets"
+    if not secrets_dir.is_dir():
+        return
+    for path in sorted(secrets_dir.glob("*.env")):
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+if "GEMINI_API_KEY_NAMI" not in os.environ:
+    _load_sibling_secrets()
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY_NAMI")
+if not GEMINI_API_KEY:
+    print("⚠️ Warning: GEMINI_API_KEY_NAMI not set. Visual summarization will be disabled.")
 
 class InputSource(Enum):
     DIRECT_MICROPHONE = auto()
@@ -61,6 +77,18 @@ class BotGoal(Enum):
     INVESTIGATE = "learn more about the user"
     TROLL = "create chaos and banter"
 
+class HostState(Enum):
+    ACTIVE = "talking regularly"
+    FADING = "slowing down or sparse"
+    QUIET = "silent"
+    UNKNOWN = "no signal yet"
+
+# Sliding-window mic-rate thresholds for HostState
+HOST_STATE_WINDOW_SECONDS = 60.0       # full window we keep timestamps for
+HOST_STATE_ACTIVE_WINDOW = 30.0        # short window for "talking right now"
+HOST_STATE_ACTIVE_THRESHOLD = 3        # >= N transcripts in short window => ACTIVE
+HOST_STATE_FRESH_STARTUP_SECONDS = 30.0  # before this, no-events => UNKNOWN (not QUIET)
+
 class SceneType(Enum):
     CHILL_CHATTING = "Just Chatting / Low Intensity"
     EXPLORATION = "Gameplay Exploration / Wandering"
@@ -69,6 +97,12 @@ class SceneType(Enum):
     HORROR_TENSION = "Spooky / High Tension"
     COMEDY_MOMENT = "Funny / Meme / Laughter"
     TECHNICAL_DOWNTIME = "Loading / Tech Issues"
+    HOST_FOCUSED_QUIET = "Host locked in — game audio busy, mic quiet"
+    HOST_LOW_ENERGY = "Host fading — mic and game audio both quiet"
+
+# --- Game (desktop) audio activity thresholds ---
+# Counts AMBIENT_AUDIO events in the recent window (WINDOW_RECENT seconds).
+GAME_AUDIO_BUSY_THRESHOLD = 3
 
 # --- Identity ---
 # The Twitch username of the bot's owner.

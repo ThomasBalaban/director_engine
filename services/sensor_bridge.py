@@ -14,6 +14,7 @@ Each socket IS the source — no inference needed.
 
 import asyncio
 import re
+import time
 from pydantic import BaseModel
 from config import InputSource
 import shared
@@ -136,6 +137,9 @@ class SensorBridge:
                 if "nami" in text.lower()
                 else InputSource.MICROPHONE
             )
+
+            # Roll up host activity signal — any mic transcript counts.
+            shared.store.record_host_speech(time.time())
 
             metadata = {
                 "confidence": payload.get("confidence", payload.get("metadata", {}).get("confidence", 1.0)),

@@ -2,12 +2,15 @@
 import time
 import threading
 import uuid
+import collections
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple, Optional
 from config import (
     InputSource, DEFAULT_MOOD, MOOD_WINDOW_SIZE,
     WINDOW_IMMEDIATE, WINDOW_RECENT, WINDOW_BACKGROUND,
-    ConversationState, FlowState, UserIntent, SceneType
+    ConversationState, FlowState, UserIntent, SceneType, HostState,
+    HOST_STATE_WINDOW_SECONDS, HOST_STATE_ACTIVE_WINDOW,
+    HOST_STATE_ACTIVE_THRESHOLD, HOST_STATE_FRESH_STARTUP_SECONDS,
 )
 from scoring import EventScore
 import config
@@ -97,9 +100,17 @@ class ContextStore:
         # --- [NEW] DIRECTIVE ---
         self.current_directive: Optional[Dict[str, Any]] = None
         
-        self.active_user_profile: Optional[Dict[str, Any]] = None 
-        
+        self.active_user_profile: Optional[Dict[str, Any]] = None
+
         self.summary_lock = threading.Lock()
+
+        # --- HOST ACTIVITY SIGNAL ---
+        # Cached state, updated from reflex_ticker. Read by prompt formatter
+        # and decision/scene logic. Source: mic transcript rate.
+        self.host_state: HostState = HostState.UNKNOWN
+        self._mic_event_timestamps: collections.deque = collections.deque()
+        self._host_state_lock = threading.Lock()
+        self._started_at: float = time.time()
 
     def add_event(self, source: InputSource, text: str, metadata: Dict[str, Any], score: EventScore) -> EventItem:
         now = time.time()
@@ -277,8 +288,9 @@ class ContextStore:
                 "flow_state": self.current_flow.name,
                 "user_intent": self.current_intent.name,
                 "scene": self.current_scene.name,
+                "host_state": self.host_state.name,
                 # --- NEW: Expose Directive ---
-                "directive": self.current_directive 
+                "directive": self.current_directive
             }
 
     def update_event_score(self, event_id: str, new_score: EventScore) -> bool:
@@ -346,6 +358,7 @@ class ContextStore:
                 "flow": self.current_flow.name,
                 "intent": self.current_intent.name,
                 "scene": self.current_scene.name,
+                "host_state": self.host_state.name,
                 "directive": self.current_directive
             }
 
@@ -360,6 +373,48 @@ class ContextStore:
             ]
             if not candidates: return None
             return sorted(candidates, key=lambda e: e.timestamp, reverse=True)[0]
+
+    # --- HOST ACTIVITY SIGNAL ---
+
+    def record_host_speech(self, ts: Optional[float] = None) -> None:
+        """Append a mic-transcript timestamp; called from sensor_bridge."""
+        if ts is None:
+            ts = time.time()
+        with self._host_state_lock:
+            self._mic_event_timestamps.append(ts)
+            self._prune_mic_timestamps_nolock(ts)
+
+    def _prune_mic_timestamps_nolock(self, now: float) -> None:
+        cutoff = now - HOST_STATE_WINDOW_SECONDS
+        dq = self._mic_event_timestamps
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+
+    def update_host_state(self, now: Optional[float] = None) -> HostState:
+        """Recompute host_state from the sliding window. Call from reflex tick."""
+        if now is None:
+            now = time.time()
+        with self._host_state_lock:
+            self._prune_mic_timestamps_nolock(now)
+            count_window = len(self._mic_event_timestamps)
+            short_cutoff = now - HOST_STATE_ACTIVE_WINDOW
+            count_short = sum(1 for t in self._mic_event_timestamps if t >= short_cutoff)
+
+            if count_window == 0:
+                if (now - self._started_at) < HOST_STATE_FRESH_STARTUP_SECONDS:
+                    new_state = HostState.UNKNOWN
+                else:
+                    new_state = HostState.QUIET
+            elif count_short >= HOST_STATE_ACTIVE_THRESHOLD:
+                new_state = HostState.ACTIVE
+            else:
+                new_state = HostState.FADING
+
+            if self.host_state != new_state:
+                print(f"🎙️ [HostState] {self.host_state.name} → {new_state.name} "
+                      f"(short={count_short}, window={count_window})")
+            self.host_state = new_state
+            return new_state
 
     def get_activity_metrics(self) -> Tuple[float, float]:
         with self.lock:

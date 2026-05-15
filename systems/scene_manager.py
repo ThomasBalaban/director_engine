@@ -1,7 +1,10 @@
 # Save as: director_engine/scene_manager.py
 import time
 from context.context_store import ContextStore
-from config import SceneType, InputSource, FlowState, ConversationState
+from config import (
+    SceneType, InputSource, FlowState, ConversationState,
+    HostState, GAME_AUDIO_BUSY_THRESHOLD,
+)
 
 class SceneManager:
     def __init__(self):
@@ -49,6 +52,21 @@ class SceneManager:
         # TECHNICAL: Dead air + low chat
         if store.current_flow == FlowState.DEAD_AIR and chat_vel < 2:
             scores[SceneType.TECHNICAL_DOWNTIME] += 0.6
+
+        # --- HOST-AWARE QUIET SCENES ---
+        # Both require Otter to not be talking. Game (desktop) audio decides
+        # whether the silence is "locked in" or "fading".
+        host_state = store.host_state
+        if host_state in (HostState.QUIET, HostState.FADING):
+            ambient_audio_count = sum(
+                1 for e in recent if e.source == InputSource.AMBIENT_AUDIO
+            )
+            if ambient_audio_count >= GAME_AUDIO_BUSY_THRESHOLD:
+                # Game is loud, he's locked in — don't pull focus
+                scores[SceneType.HOST_FOCUSED_QUIET] += 0.75
+            else:
+                # Both mic and game quiet — fill the dead air
+                scores[SceneType.HOST_LOW_ENERGY] += 0.65
 
         # 3. Select Winner
         best_scene = max(scores, key=scores.get)

@@ -19,6 +19,7 @@ from config import (
     BotGoal,
     FlowState,
     ConversationState,
+    SceneType,
 )
 from context.context_store import ContextStore, EventItem
 from systems.decision_engine import Directive
@@ -90,7 +91,7 @@ class SpeechDispatcher:
                 return SpeechDecision(
                     should_speak=True,
                     reason="Skill Issue Detected",
-                    content="React to the user's failure. Say 'skill issue' or roast them.",
+                    content="Roast the failure. 'Skill issue.' One line.",
                     priority=0.1,
                     source_info={
                         "source": "DIRECTOR_SKILL_ISSUE",
@@ -103,7 +104,7 @@ class SpeechDispatcher:
                 return SpeechDecision(
                     should_speak=True,
                     reason="Victory Detected",
-                    content="Celebrate the user's win! Be hype!",
+                    content="Hype the win. Short, loud.",
                     priority=0.2,
                     source_info={
                         "source": "DIRECTOR_VICTORY",
@@ -117,7 +118,7 @@ class SpeechDispatcher:
                 return SpeechDecision(
                     should_speak=True,
                     reason="Meme Moment",
-                    content=f"React to this funny moment: {visual_ref}",
+                    content=f"React to {visual_ref}. One line.",
                     priority=0.3,
                     source_info={
                         "source": "DIRECTOR_MEME",
@@ -130,7 +131,7 @@ class SpeechDispatcher:
                 return SpeechDecision(
                     should_speak=True,
                     reason="Dead Air",
-                    content="Fill the awkward silence. Say something random or provocative.",
+                    content="Otter's gone quiet. Fill the gap — observation, callback, or stir something up. One sentence.",
                     priority=0.5,
                     source_info={
                         "source": "DIRECTOR_DEAD_AIR",
@@ -144,7 +145,7 @@ class SpeechDispatcher:
                 return SpeechDecision(
                     should_speak=True,
                     reason="Visual Fixation",
-                    content=f"You keep seeing a {entity}. Comment on it obsessively.",
+                    content=f"That {entity} keeps showing up. Call it out. One line.",
                     priority=0.4,
                     source_info={
                         "source": "DIRECTOR_FIXATION",
@@ -152,6 +153,12 @@ class SpeechDispatcher:
                         "event_id": event.id,
                     },
                 )
+
+        # When Otter is locked into the game, only react to high-priority
+        # system patterns (skill issue, victory, meme, void, fixation).
+        # Skip idle thought triggers and passive observation entirely.
+        if store.current_scene == SceneType.HOST_FOCUSED_QUIET:
+            return None
 
         # --- Priority 2: Internal Thoughts ---
         # IMPORTANT: Do NOT pass the raw thought text as `content` — that makes
@@ -171,11 +178,11 @@ class SpeechDispatcher:
             thought_type = event.metadata.get("type", "shower_thought")
 
             if thought_type == "callback":
-                instruction = "Reference something that happened earlier in the stream naturally."
+                instruction = "Callback to something earlier in the stream. One sentence."
             elif thought_goal == "fill_silence":
-                instruction = "Fill the silence — say something weird, random, or provocative based on what you've been seeing."
+                instruction = "Otter's quiet. Drop a quick observation or odd thought from what you've been seeing. One sentence."
             else:
-                instruction = "React to the current situation based on what you know."
+                instruction = "React to what's happening. One sentence."
 
             return SpeechDecision(
                 should_speak=True,
@@ -209,7 +216,7 @@ class SpeechDispatcher:
             return SpeechDecision(
                 should_speak=True,
                 reason=f"Passive Observation ({best.source.name})",
-                content=f"You notice: {best.text}. React to it - {action} this.",
+                content=f"You notice: {best.text}. {action.capitalize()} it. One line.",
                 priority=0.7,
                 source_info={
                     "source": f"DIRECTOR_{best.source.name}",

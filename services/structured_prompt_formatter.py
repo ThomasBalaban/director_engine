@@ -85,7 +85,10 @@ class StructuredPromptFormatter:
         # 1. DIRECTIVE (Critical instructions)
         if directive:
             sections.append(self._format_directive(directive, priority="CRITICAL"))
-        
+
+        # 1b. HOST STATE (is Otter actively talking?)
+        sections.append(self._format_host_state(store))
+
         # 2. USER CONTEXT (Who we're talking to)
         if store.active_user_profile:
             sections.append(self._format_user_context(store.active_user_profile))
@@ -117,7 +120,10 @@ class StructuredPromptFormatter:
         # 1. DIRECTIVE
         if directive:
             sections.append(self._format_directive(directive, priority="CRITICAL"))
-        
+
+        # 1b. HOST STATE (is Otter actively talking?)
+        sections.append(self._format_host_state(store))
+
         # 2. SCENE STATE + VISUALS (Main focus)
         sections.append(f"""<focus type="GAMEPLAY" priority="HIGH">
 {self._format_scene_metadata(store)}
@@ -140,6 +146,20 @@ class StructuredPromptFormatter:
         
         return sections
     
+    def _format_host_state(self, store: ContextStore) -> str:
+        """Surface Otter's mic activity so the LLM knows whether to pull focus."""
+        state = store.host_state.name
+        hint = {
+            "ACTIVE": "Otter is talking. Don't pull focus — quick reactions only, no rambling.",
+            "FADING": "Otter is quiet-ish. Light banter is welcome; don't dominate.",
+            "QUIET": "Otter has gone silent. Fill the gap — observation, callback, or stir something up.",
+            "UNKNOWN": "No mic signal yet — assume he might start any second.",
+        }.get(state, "")
+        return f"""<host_state priority="HIGH">
+  <state>{state}</state>
+  <guidance>{hint}</guidance>
+</host_state>"""
+
     def _format_directive(self, directive: Directive, priority: str = "CRITICAL") -> str:
         """Format directive as structured instruction block."""
         constraints_xml = ""
