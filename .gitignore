@@ -2,3 +2,4 @@ __pycache__
 profiles/**
 private_key.py
 audio_effects/**
+director_state.json

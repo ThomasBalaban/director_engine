@@ -168,6 +168,32 @@ class SensorBridge:
             except Exception as e:
                 print(f"⚠️ [SensorBridge] Error handling bot_reply: {e}")
 
+        # --- UI control events (streamer / manual context / locks) ---
+        # These were emitted by the UI and relayed by the hub but never
+        # subscribed to here. Without them, manual changes never reached
+        # the director and the locks were structurally always False.
+
+        @shared.sio.on("set_streamer")
+        async def on_set_streamer(payload: dict):
+            streamer_id = (payload or {}).get("streamer_id")
+            if streamer_id is not None:
+                shared.set_current_streamer(streamer_id, from_ai=False)
+
+        @shared.sio.on("set_manual_context")
+        async def on_set_manual_context(payload: dict):
+            context = (payload or {}).get("context", "") or ""
+            shared.set_manual_context(context, from_ai=False)
+
+        @shared.sio.on("set_streamer_lock")
+        async def on_set_streamer_lock(payload: dict):
+            locked = bool((payload or {}).get("locked", False))
+            shared.set_streamer_locked(locked)
+
+        @shared.sio.on("set_context_lock")
+        async def on_set_context_lock(payload: dict):
+            locked = bool((payload or {}).get("locked", False))
+            shared.set_context_locked(locked)
+
         # --- Generic event injection (manual / test harness) ---
 
         @shared.sio.on("event")

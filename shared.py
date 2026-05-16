@@ -8,9 +8,11 @@ The brain no longer tracks whether Nami is speaking.
 """
 
 import asyncio
+import json
 import socketio
 import time
 import traceback
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 import config
 from context.context_store import ContextStore, EventItem
@@ -30,13 +32,49 @@ sio = socketio.AsyncClient(reconnection=True, reconnection_attempts=0, reconnect
 ui_event_loop: Optional[asyncio.AbstractEventLoop] = None
 server_ready: bool = False
 
-# --- DIRECTOR MANUAL CONTEXT ---
+# --- DIRECTOR MANUAL CONTEXT (defaults; overridden by _load_director_state) ---
 manual_context: str = ""
 current_streamer: str = "peepingotter"
 
 # --- Lock states for AI auto-fill ---
 streamer_locked: bool = False
 context_locked: bool = False
+
+# --- Persisted state file ---
+# Lets the operator set "watching X / context Y / lock both" before booting
+# the services. Without this, UI events sent before director-hub connect
+# are dropped, then the director's defaults overwrite the UI on first emit.
+_STATE_FILE = Path(__file__).resolve().parent / "director_state.json"
+
+def _save_director_state() -> None:
+    try:
+        _STATE_FILE.write_text(json.dumps({
+            "manual_context": manual_context,
+            "current_streamer": current_streamer,
+            "streamer_locked": streamer_locked,
+            "context_locked": context_locked,
+        }, indent=2))
+    except Exception as e:
+        print(f"⚠️ [Director] Failed to persist state: {e}")
+
+def _load_director_state() -> None:
+    global manual_context, current_streamer, streamer_locked, context_locked
+    if not _STATE_FILE.exists():
+        return
+    try:
+        data = json.loads(_STATE_FILE.read_text())
+        manual_context = data.get("manual_context", manual_context) or ""
+        current_streamer = data.get("current_streamer", current_streamer) or current_streamer
+        streamer_locked = bool(data.get("streamer_locked", streamer_locked))
+        context_locked = bool(data.get("context_locked", context_locked))
+        print(f"💾 [Director] Restored state: streamer={current_streamer!r} "
+              f"(locked={streamer_locked}), context={'set' if manual_context else 'empty'} "
+              f"(locked={context_locked})")
+    except Exception as e:
+        print(f"⚠️ [Director] Failed to load persisted state: {e}")
+
+# Restore before any setter / getter is called
+_load_director_state()
 
 def set_manual_context(context: str, from_ai: bool = False):
     global manual_context, context_locked
@@ -46,6 +84,7 @@ def set_manual_context(context: str, from_ai: bool = False):
     manual_context = context
     source = "AI" if from_ai else "Manual"
     print(f"📝 [Director] Context set ({source}): {context[:50]}..." if context else f"📝 [Director] Context cleared ({source})")
+    _save_director_state()
     return True
 
 def get_manual_context() -> str:
@@ -60,6 +99,7 @@ def set_current_streamer(streamer_id: str, from_ai: bool = False):
     current_streamer = streamer_id
     source = "AI" if from_ai else "Manual"
     print(f"📺 [Director] Now watching ({source}): {streamer_id}")
+    _save_director_state()
     return True
 
 def get_current_streamer() -> str:
@@ -70,11 +110,13 @@ def set_streamer_locked(locked: bool):
     global streamer_locked
     streamer_locked = locked
     print(f"{'🔒' if locked else '🔓'} [Director] Streamer lock: {locked}")
+    _save_director_state()
 
 def set_context_locked(locked: bool):
     global context_locked
     context_locked = locked
     print(f"{'🔒' if locked else '🔓'} [Director] Context lock: {locked}")
+    _save_director_state()
 
 def is_streamer_locked() -> bool:
     global streamer_locked
