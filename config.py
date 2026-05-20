@@ -139,4 +139,15 @@ OLLAMA_TRIGGER_THRESHOLD = 0.5
 OLLAMA_MODEL = 'llama3.2:latest'
 OLLAMA_HOST = 'http://localhost:11434'
 
+# --- Ollama throughput tuning ---
+# A 32B-class model on the M4 takes ~10-14s per call at modest prompt sizes
+# and exceeds 15s once prompts cross ~2k tokens. Two concurrent calls compound
+# and most start failing the timeout. These knobs gate that.
+OLLAMA_MAX_CONCURRENT = 2          # global cap on in-flight Ollama calls
+OLLAMA_TIMEOUT_THOUGHT = 45.0      # generate_thought
+OLLAMA_TIMEOUT_ANALYZE = 45.0      # analyze_and_update_event
+OLLAMA_TIMEOUT_SUMMARY = 45.0      # generate_summary
+OLLAMA_TIMEOUT_CTX_INFER = 30.0    # _do_context_inference
+OLLAMA_TIMEOUT_COMPRESS = 60.0     # _compress_recent / _compress_ancient
+
 PROMPT_SERVICE_URL = "http://localhost:8001"

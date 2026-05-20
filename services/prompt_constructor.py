@@ -32,7 +32,7 @@ class PromptConstructor:
                 }
                 
                 self.gemini_model = genai.GenerativeModel(
-                    'gemini-1.5-flash',
+                    'gemini-2.0-flash',
                     safety_settings=safety_settings
                 )
                 print("✅ [PromptConstructor] Gemini Flash initialized (Safety Filters DISABLED).")
@@ -162,13 +162,22 @@ class PromptConstructor:
                     f"RAW DATA:\n{raw_text_block}"
                 )
                 
-                # --- CRITICAL FIX: ASYNC CALL PREVENTS SERVER FREEZE ---
-                response = await self.gemini_model.generate_content_async(gemini_prompt)
+                # Async alone doesn't prevent freeze if the awaitable hangs forever.
+                # Wrap in wait_for to bound the call — matches the pattern used in
+                # llm_analyst.py:156-162.
+                response = await asyncio.wait_for(
+                    self.gemini_model.generate_content_async(gemini_prompt),
+                    timeout=10.0,
+                )
                 summary = response.text.strip()
                 return f"### VISUAL CONTEXT (Condensed)\n{summary}"
-                
+
+            except asyncio.TimeoutError:
+                print("⏱️  [PromptConstructor] Gemini Summarization timed out after 10s — using fallback")
             except Exception as e:
-                print(f"⚠️ [PromptConstructor] Gemini Summarization Failed: {e}")
+                kind = type(e).__name__
+                detail = str(e) or repr(e)
+                print(f"⚠️ [PromptConstructor] Gemini Summarization Failed ({kind}): {detail}")
         
         # 2. SMART FALLBACK (Deduplication)
         # Use dict.fromkeys to preserve order while removing exact duplicates

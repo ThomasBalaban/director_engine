@@ -54,6 +54,37 @@ def _handle_context_inference_result(result: Dict[str, str]):
             last_inferred_game = new_game
 
 
+# ── Per-source rate limiting ─────────────────────────────────────────────────
+# Vision events arrive at ~30/min sustained, with bursts. Each one triggers
+# scoring → store mutation → emit → maybe analyze. Under load that's enough
+# to add measurable latency to the asyncio loop. Drop excess vision events
+# at the front door so only ~1 every 2s reaches the heavy path.
+#
+# High-priority sources (mic, direct mentions, twitch interactions) are
+# NEVER rate-limited — they're rare and conversation-critical.
+_VISION_MIN_INTERVAL_S = 2.0
+_last_vision_event_at = 0.0
+_vision_events_dropped_total = 0
+
+
+def _should_accept_event(source: config.InputSource) -> bool:
+    """Front-door rate limit. Returns False to drop the event entirely."""
+    global _last_vision_event_at, _vision_events_dropped_total
+    if source != config.InputSource.VISUAL_CHANGE:
+        return True
+    now = _time.monotonic()
+    if now - _last_vision_event_at < _VISION_MIN_INTERVAL_S:
+        _vision_events_dropped_total += 1
+        if _vision_events_dropped_total <= 5 or _vision_events_dropped_total % 50 == 0:
+            print(
+                f"⚠️  [CoreLogic] DROPPED vision event — rate limit "
+                f"({_vision_events_dropped_total} total dropped)"
+            )
+        return False
+    _last_vision_event_at = now
+    return True
+
+
 # --- EVENT PROCESSOR ---
 async def process_engine_event(
     source: config.InputSource,
@@ -63,11 +94,17 @@ async def process_engine_event(
 ):
     """
     Process an incoming event from any source.
-    
+
     For direct addresses (mic with "nami", or handler twitch mention),
     we send an interrupt request to the prompt service. We don't check
     local speaking state — the prompt service handles that.
     """
+    # Front-door rate limiting (vision only — see _should_accept_event)
+    if not _should_accept_event(source):
+        return
+
+    # Yield to the loop — gives socket.io PINGs and other tasks a chance.
+    await asyncio.sleep(0)
     # --- DETECT DIRECT ADDRESS ---
     is_direct_address = source == config.InputSource.DIRECT_MICROPHONE
     
@@ -180,51 +217,133 @@ def handle_analysis_complete(event: EventItem):
 
 # --- TICKERS ---
 
+# ── Freeze-diagnostic instrumentation ─────────────────────────────────────────
+# Updated as the reflex_ticker progresses. heartbeat_ticker reads this to
+# report which step the reflex loop was on when (if) it stops making progress.
+import time as _time
+
+_reflex_state = {
+    "step": "boot",
+    "step_started_at": _time.monotonic(),
+    "iteration": 0,
+    # Tracked here for the file_heartbeat diagnostic + backoff logic
+    "last_speech_trigger_at": 0.0,
+    "last_iter_actual_duration_s": 0.0,
+    "last_iter_loop_drift_s": 0.0,
+    "recent_thought_timeouts": 0,
+    "recent_thought_timeouts_window_start": _time.monotonic(),
+    "backoff_active_until": 0.0,
+}
+
+
+def _mark_reflex_step(name: str) -> None:
+    _reflex_state["step"] = name
+    _reflex_state["step_started_at"] = _time.monotonic()
+
+
+# ── Reflex-loop self-protection knobs ────────────────────────────────────────
+# Tunable thresholds. All times in seconds.
+MIN_SPEECH_TRIGGER_INTERVAL_S = 4.0       # cap director-side speech rate
+THOUGHT_TIMEOUT_WINDOW_S       = 30.0     # rolling window for timeout counting
+THOUGHT_TIMEOUT_BACKOFF_THRESHOLD = 3     # N timeouts in window → backoff
+BACKOFF_DURATION_S             = 20.0     # how long to back off when overloaded
+LOOP_DRIFT_BACKOFF_THRESHOLD_S = 3.0      # if sleep(1.0) takes 3s+, loop is starved
+
+
+def _note_thought_timeout() -> None:
+    """Track a generate_thought timeout in the rolling window."""
+    now = _time.monotonic()
+    win_start = _reflex_state["recent_thought_timeouts_window_start"]
+    if now - win_start > THOUGHT_TIMEOUT_WINDOW_S:
+        _reflex_state["recent_thought_timeouts"] = 0
+        _reflex_state["recent_thought_timeouts_window_start"] = now
+    _reflex_state["recent_thought_timeouts"] += 1
+    if _reflex_state["recent_thought_timeouts"] >= THOUGHT_TIMEOUT_BACKOFF_THRESHOLD:
+        _reflex_state["backoff_active_until"] = now + BACKOFF_DURATION_S
+        print(
+            f"🛑 [Reflex] Ollama overloaded ({_reflex_state['recent_thought_timeouts']} timeouts "
+            f"in {THOUGHT_TIMEOUT_WINDOW_S:.0f}s) — backing off speech triggers for {BACKOFF_DURATION_S:.0f}s"
+        )
+
+
+def _is_in_backoff() -> bool:
+    return _time.monotonic() < _reflex_state["backoff_active_until"]
+
+
 async def reflex_ticker():
     """
     High-frequency tick. Generates thoughts and speech decisions.
-    
+
     The brain generates freely — the prompt service gates delivery.
     No speaking-state checks here.
     """
     while not shared.server_ready:
         await asyncio.sleep(0.1)
     print("✅ Reflex ticker starting (High Frequency)")
-    
+
     # Initialize prompt client
     await prompt_client.initialize()
-    
+
     while True:
+        iter_start = _time.monotonic()
+        _reflex_state["iteration"] += 1
         try:
+            # Yield to the loop early — gives the socket.io PING handler and
+            # other hot tasks a chance to run before we hog CPU on sync work.
+            await asyncio.sleep(0)
+
+            _mark_reflex_step("update_host_state")
             shared.store.update_host_state()
+
+            _mark_reflex_step("update_goal")
             shared.behavior_engine.update_goal(shared.store)
+
+            _mark_reflex_step("get_activity_metrics")
             chat_vel, energy_level = shared.store.get_activity_metrics()
             shared.adaptive_ctrl.update(chat_vel, energy_level)
-            
+
+            _mark_reflex_step("generate_directive")
             directive = shared.decision_engine.generate_directive(
                 shared.store, shared.behavior_engine, shared.adaptive_ctrl, shared.energy_system
             )
             shared.store.set_directive(directive)
-            
-            # Generate thoughts freely
-            thought_text = await shared.behavior_engine.check_internal_monologue(shared.store)
-            if thought_text:
-                print(f"💡 [Reflex] Thought: {thought_text}")
-                thought_event = shared.store.add_event(
-                    config.InputSource.INTERNAL_THOUGHT, thought_text,
-                    {"type": "shower_thought", "goal": "fill_silence"},
-                    EventScore(interestingness=0.95, conversational_value=1.0, urgency=0.8)
-                )
-                shared.emit_event_scored(thought_event)
 
-            # Evaluate speech decisions
-            speech_decision = shared.speech_dispatcher.evaluate(
-                shared.store, shared.behavior_engine, shared.energy_system, directive
+            # Spawn (fire-and-forget) monologue generation. This does NOT
+            # block on Ollama anymore — the background task adds the event
+            # to the store directly when the LLM responds.
+            _mark_reflex_step("kick_monologue")
+            await shared.behavior_engine.check_internal_monologue(shared.store)
+
+            # Another yield before potentially CPU-heavy speech dispatcher work
+            await asyncio.sleep(0)
+
+            # ── Speech dispatcher gating ─────────────────────────────────────
+            # Three gates added to prevent the trigger flood:
+            #   1. Backoff mode (Ollama overloaded) — skip entirely
+            #   2. Min interval since last trigger — director-side cooldown
+            #   3. Loop drift detection — if the loop is starved, don't pile on
+            now = _time.monotonic()
+            time_since_last_trigger = now - _reflex_state["last_speech_trigger_at"]
+            should_evaluate_speech = (
+                not _is_in_backoff()
+                and time_since_last_trigger >= MIN_SPEECH_TRIGGER_INTERVAL_S
+                and _reflex_state["last_iter_loop_drift_s"] < LOOP_DRIFT_BACKOFF_THRESHOLD_S
             )
+
+            speech_decision = None
+            if should_evaluate_speech:
+                _mark_reflex_step("evaluate_speech")
+                speech_decision = shared.speech_dispatcher.evaluate(
+                    shared.store, shared.behavior_engine, shared.energy_system, directive
+                )
+
             if speech_decision:
                 print(f"🎤 [Reflex] Trigger: {speech_decision.reason}")
+                _reflex_state["last_speech_trigger_at"] = now
+                _mark_reflex_step("spend_energy")
                 # Spend energy on our side
                 shared.energy_system.spend(config.ENERGY_COST_INTERJECTION)
+                _mark_reflex_step("dispatch_speech_task")
                 # Send to prompt service (it decides whether to deliver)
                 asyncio.create_task(prompt_client.request_speech(
                     trigger=speech_decision.reason,
@@ -234,20 +353,127 @@ async def reflex_ticker():
                     event_id=speech_decision.source_info.get('event_id'),
                     metadata=speech_decision.source_info,
                 ))
-                    
+
             # Check callbacks
+            _mark_reflex_step("check_callbacks")
             callback_text = shared.behavior_engine.check_callbacks(shared.store)
             if callback_text:
+                _mark_reflex_step("emit_callback_event")
                 cb_event = shared.store.add_event(
                     config.InputSource.INTERNAL_THOUGHT, callback_text,
                     {"type": "callback", "goal": "context_continuity"},
                     EventScore(interestingness=0.7, conversational_value=0.8)
                 )
                 shared.emit_event_scored(cb_event)
-                    
+
+            _mark_reflex_step("idle_sleep")
+
         except Exception as e:
-            print(f"⚠️ [Reflex] Error: {e}")
-        await asyncio.sleep(1.0)
+            kind = type(e).__name__
+            detail = str(e) or repr(e)
+            print(f"⚠️ [Reflex] Error ({kind}) at step={_reflex_state['step']}: {detail}")
+
+        # ── Loop drift measurement ────────────────────────────────────────────
+        # Compare wall-clock elapsed against the 1.0s sleep target. If drift
+        # exceeds the threshold, the loop is starved (sync work running too
+        # long elsewhere). Next iteration's dispatcher will see this and skip.
+        sleep_target = 1.0
+        before_sleep = _time.monotonic()
+        await asyncio.sleep(sleep_target)
+        after_sleep = _time.monotonic()
+        actual_sleep = after_sleep - before_sleep
+        iter_total = after_sleep - iter_start
+        _reflex_state["last_iter_actual_duration_s"] = round(iter_total, 3)
+        _reflex_state["last_iter_loop_drift_s"] = round(actual_sleep - sleep_target, 3)
+
+
+async def heartbeat_ticker():
+    """
+    Independent asyncio task that proves the event loop is alive.
+
+    Stuck-detection is now based on iteration progression, NOT step age
+    (step_age gets reset every _mark_reflex_step call and is misleading).
+
+    - "stuck" = iteration counter hasn't advanced for > STUCK_THRESHOLD_S.
+    - "recovered" only fires when iteration actually moves forward.
+
+    Interpretation:
+    - Heartbeat keeps logging while reflex iteration is frozen → loop is
+      alive, the main task is stuck on a specific await (named in 'step').
+    - Heartbeat ALSO stops → event loop itself is blocked. Compare against
+      the thread watchdog: if that one keeps going, the asyncio loop is
+      wedged; if both stop, the whole Python process is wedged.
+    """
+    STUCK_THRESHOLD_S = 10.0
+
+    while not shared.server_ready:
+        await asyncio.sleep(0.5)
+    print("✅ Heartbeat starting (diagnostic, every 5s)")
+
+    last_iteration = -1
+    last_iteration_change_at = _time.monotonic()
+    was_stuck = False
+    stuck_warnings_emitted = 0
+
+    while True:
+        await asyncio.sleep(5.0)
+        now = _time.monotonic()
+        step = _reflex_state["step"]
+        iteration = _reflex_state["iteration"]
+
+        progressed = iteration != last_iteration
+        if progressed:
+            last_iteration = iteration
+            last_iteration_change_at = now
+
+        time_since_progress = now - last_iteration_change_at
+        is_stuck = time_since_progress > STUCK_THRESHOLD_S
+
+        if is_stuck:
+            stuck_warnings_emitted += 1
+            was_stuck = True
+            print(
+                f"🚨 [Heartbeat] reflex STUCK on step='{step}' — iteration={iteration} "
+                f"has not advanced for {time_since_progress:.1f}s "
+                f"(warning #{stuck_warnings_emitted}) | loop alive, main task hung"
+            )
+        else:
+            if was_stuck and progressed:
+                print(
+                    f"✅ [Heartbeat] reflex RECOVERED — iteration advanced to {iteration} "
+                    f"after {stuck_warnings_emitted} stuck warning(s)"
+                )
+                was_stuck = False
+                stuck_warnings_emitted = 0
+            print(f"💓 [Heartbeat] alive | reflex_step='{step}' iter={iteration}")
+
+
+def _thread_watchdog_loop():
+    """
+    OS-thread watchdog. Does NOT use asyncio — runs in its own daemon thread,
+    so it logs even if the entire asyncio event loop is blocked by a
+    synchronous call.
+
+    Diagnostic interpretation:
+    - Asyncio heartbeat stops, this keeps logging → event loop is wedged
+      by a sync call somewhere. Need run_in_executor for the suspect call.
+    - Both stop → the whole Python process is stuck (OOM, GIL held by C
+      extension, signal handler deadlock, swap thrash, etc).
+    """
+    import threading as _threading
+    print(f"✅ Thread watchdog starting (diagnostic, every 10s, thread={_threading.current_thread().name})")
+    while True:
+        _time.sleep(10.0)
+        step = _reflex_state["step"]
+        iteration = _reflex_state["iteration"]
+        print(f"🧵 [ThreadWatchdog] alive | reflex_step='{step}' iter={iteration}")
+
+
+def start_thread_watchdog() -> None:
+    """Start the thread-based watchdog. Called from main during boot."""
+    import threading as _threading
+    t = _threading.Thread(target=_thread_watchdog_loop, name="thread-watchdog", daemon=True)
+    t.start()
 
 
 def build_smart_memory_query(store, summary_data: Dict[str, Any]) -> str:

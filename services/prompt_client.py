@@ -12,6 +12,16 @@ from config import PROMPT_SERVICE_URL
 
 _client: Optional[httpx.AsyncClient] = None
 
+# ── In-flight backpressure ────────────────────────────────────────────────────
+# Each request_speech spawns an HTTP POST. Under reflex-trigger floods these
+# pile up, each one consuming asyncio scheduler time, the GIL during JSON
+# serialization, and a socket from the httpx pool. When prompt_service is
+# already cooldown-blocking, the requests still cost us. Cap inflight and
+# drop excess so the loop can breathe.
+_MAX_INFLIGHT_REQUESTS = 4
+_inflight = 0
+_dropped_total = 0
+
 
 async def initialize():
     global _client
@@ -45,6 +55,20 @@ async def request_speech(
     if not _client:
         await initialize()
 
+    global _inflight, _dropped_total
+
+    # Backpressure: drop non-interrupt requests when saturated. Interrupts
+    # (direct mentions, urgency) bypass the cap — they're the rare-but-important
+    # path. Regular reflex-trigger floods get dropped to keep the loop healthy.
+    if not is_interrupt and _inflight >= _MAX_INFLIGHT_REQUESTS:
+        _dropped_total += 1
+        if _dropped_total <= 5 or _dropped_total % 20 == 0:
+            print(
+                f"⚠️  [PromptClient] DROPPED non-interrupt request "
+                f"({_inflight} in-flight, {_dropped_total} total dropped) | trigger={trigger}"
+            )
+        return {"delivered": False, "gate_result": "director_backpressure"}
+
     payload = {
         "trigger": trigger,
         "content": content,
@@ -55,6 +79,7 @@ async def request_speech(
         "metadata": metadata or {},
     }
 
+    _inflight += 1
     try:
         response = await _client.post(
             f"{PROMPT_SERVICE_URL}/speak",
@@ -62,22 +87,31 @@ async def request_speech(
             timeout=2.0,
         )
         result = response.json()
-        
+
         if result.get("delivered"):
             print(f"✅ [PromptClient] Delivered: {trigger}")
         else:
             reason = result.get("gate_result", "unknown")
             if reason != "already_reacted":  # Don't spam logs for dedup
                 print(f"🚫 [PromptClient] Blocked: {reason} | {trigger}")
-        
+
         return result
 
     except httpx.ConnectError:
         print(f"❌ [PromptClient] Cannot reach prompt service at {PROMPT_SERVICE_URL}")
         return {"delivered": False, "gate_result": "service_unreachable"}
+    except httpx.TimeoutException as e:
+        # ReadTimeout / PoolTimeout / ConnectTimeout — str(e) is often empty
+        kind = type(e).__name__
+        print(f"⏱️  [PromptClient] Timeout ({kind}) talking to prompt service | trigger={trigger}")
+        return {"delivered": False, "gate_result": f"timeout: {kind}"}
     except Exception as e:
-        print(f"❌ [PromptClient] Error: {e}")
-        return {"delivered": False, "gate_result": f"error: {e}"}
+        # Always include the exception type — many httpx errors have empty str()
+        detail = str(e) or repr(e)
+        print(f"❌ [PromptClient] Error ({type(e).__name__}): {detail} | trigger={trigger}")
+        return {"delivered": False, "gate_result": f"error: {type(e).__name__}"}
+    finally:
+        _inflight -= 1
 
 
 async def send_interrupt(

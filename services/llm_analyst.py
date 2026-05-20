@@ -12,6 +12,8 @@ import httpx
 import asyncio
 from config import (
     OLLAMA_MODEL, OLLAMA_HOST,
+    OLLAMA_TIMEOUT_THOUGHT, OLLAMA_TIMEOUT_ANALYZE,
+    OLLAMA_TIMEOUT_SUMMARY, OLLAMA_TIMEOUT_CTX_INFER,
     INTERJECTION_THRESHOLD, InputSource,
     ConversationState, FlowState, UserIntent,
     OWNER_STREAMER_ID
@@ -19,6 +21,8 @@ from config import (
 from context.context_store import ContextStore, EventItem
 from context.user_profile_manager import UserProfileManager
 from scoring import EventScore
+from services.ollama_gate import get_ollama_gate
+from diagnostics import log_error
 from typing import List, Tuple, Callable, Any, Optional, Dict
 
 # Global Async Clients
@@ -30,6 +34,31 @@ _context_inference_running = False
 _last_inferred_result: Optional[Dict[str, str]] = None
 
 MEMORY_PROMOTION_THRESHOLD = 0.70
+
+# --- Concurrency control for analyze_and_update_event ---
+# Each call holds the event loop while doing JSON parse / regex / store
+# mutation after the ollama response returns. Without a bound, vision events
+# (one every ~2s) stack up faster than ollama can drain them, starving the
+# asyncio loop and causing asyncio.sleep(1.0) to overrun by ~10s.
+#
+# MAX_CONCURRENT: in-flight analyses. ollama serves one inference at a time
+#   anyway, so >2 here just adds GIL ping-pong for sync post-processing.
+# MAX_PENDING:    hard cap on queue depth. Beyond this, drop the newest call
+#   with a clear log line. Dropped events skip analysis but still hit the
+#   store via heuristic scoring upstream.
+_ANALYZE_MAX_CONCURRENT = 2
+_ANALYZE_MAX_PENDING = 4
+_analyze_sem: Optional[asyncio.Semaphore] = None
+_analyze_pending = 0
+_analyze_dropped_total = 0
+
+
+def _get_analyze_sem() -> asyncio.Semaphore:
+    """Lazy init so the Semaphore binds to the running event loop."""
+    global _analyze_sem
+    if _analyze_sem is None:
+        _analyze_sem = asyncio.Semaphore(_ANALYZE_MAX_CONCURRENT)
+    return _analyze_sem
 
 async def create_http_client():
     global http_client, ollama_client
@@ -97,14 +126,33 @@ async def generate_thought(prompt_text: str, stream_context: str = "", watching_
     )
 
     try:
-        response = await ollama_client.chat(
-            model=OLLAMA_MODEL,
-            messages=[{'role': 'user', 'content': full_prompt}],
-            options={"temperature": 0.8, "num_predict": 60}
-        )
+        async with get_ollama_gate():
+            response = await asyncio.wait_for(
+                ollama_client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{'role': 'user', 'content': full_prompt}],
+                    options={"temperature": 0.8, "num_predict": 60}
+                ),
+                timeout=OLLAMA_TIMEOUT_THOUGHT,
+            )
         return response['message']['content'].strip().strip('"')
+    except asyncio.TimeoutError:
+        print(f"⏱️  [Analyst] generate_thought timed out after {OLLAMA_TIMEOUT_THOUGHT}s")
+        log_error("analyst.generate_thought", "ollama chat timeout",
+                  timeout_s=OLLAMA_TIMEOUT_THOUGHT)
+        # Notify core_logic so it can flip into backoff mode after enough timeouts.
+        # Lazy import avoids circular dependency at module-load time.
+        try:
+            import core_logic as _cl
+            _cl._note_thought_timeout()
+        except Exception:
+            pass
+        return None
     except Exception as e:
-        print(f"[Analyst] Thought generation error: {e}")
+        kind = type(e).__name__
+        detail = str(e) or repr(e)
+        print(f"[Analyst] Thought generation error ({kind}): {detail}")
+        log_error("analyst.generate_thought", "ollama chat error", exc=e)
         return None
 
 
@@ -153,14 +201,15 @@ Rules:
 - If unsure, say "Unknown" for game
 """
 
-        response = await asyncio.wait_for(
-            ollama_client.chat(
-                model=OLLAMA_MODEL,
-                messages=[{'role': 'user', 'content': prompt}],
-                options={"temperature": 0.3, "num_predict": 100}
-            ),
-            timeout=10.0
-        )
+        async with get_ollama_gate():
+            response = await asyncio.wait_for(
+                ollama_client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{'role': 'user', 'content': prompt}],
+                    options={"temperature": 0.3, "num_predict": 100}
+                ),
+                timeout=OLLAMA_TIMEOUT_CTX_INFER
+            )
 
         result_text = response['message']['content'].strip()
 
@@ -183,9 +232,12 @@ Rules:
 
     except asyncio.TimeoutError:
         print(f"[Analyst] ⏱️ Context inference timed out")
+        log_error("analyst.context_inference", "ollama chat timeout",
+                  timeout_s=OLLAMA_TIMEOUT_CTX_INFER)
         return None
     except Exception as e:
         print(f"[Analyst] Context inference error: {e}")
+        log_error("analyst.context_inference", "ollama chat error", exc=e)
         return None
     finally:
         _context_inference_running = False
@@ -292,18 +344,51 @@ async def analyze_and_update_event(
 ):
     if not ollama_client: return
 
+    global _analyze_pending, _analyze_dropped_total
+
+    # Backpressure: drop if already saturated. Prevents create_task callers
+    # from piling up unbounded when ollama can't keep up with vision events.
+    if _analyze_pending >= _ANALYZE_MAX_PENDING:
+        _analyze_dropped_total += 1
+        # Log every drop initially, then sample (mod 10) to avoid log spam during sustained load
+        if _analyze_dropped_total <= 5 or _analyze_dropped_total % 10 == 0:
+            print(
+                f"⚠️  [Analyst] DROPPED analysis for event {event.id} "
+                f"({_analyze_pending} pending, {_analyze_dropped_total} total dropped) "
+                f"— backpressure active"
+            )
+        return
+
+    _analyze_pending += 1
+    try:
+        async with _get_analyze_sem():
+            await _analyze_and_update_event_inner(event, store, profile_manager, emit_callback)
+    finally:
+        _analyze_pending -= 1
+
+
+async def _analyze_and_update_event_inner(
+    event: EventItem,
+    store: ContextStore,
+    profile_manager: UserProfileManager,
+    emit_callback: Callable[[EventItem], None] | None = None
+):
     username = event.metadata.get('username')
     target_user = username if event.source in [InputSource.DIRECT_MICROPHONE, InputSource.TWITCH_MENTION] else None
 
     prompt = build_analysis_prompt(event.text, target_user)
 
     try:
-        response = await ollama_client.chat(
-            model=OLLAMA_MODEL,
-            messages=[{'role': 'user', 'content': prompt}],
-            options={"temperature": 0.2},
-            format='json'
-        )
+        async with get_ollama_gate():
+            response = await asyncio.wait_for(
+                ollama_client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{'role': 'user', 'content': prompt}],
+                    options={"temperature": 0.2},
+                    format='json'
+                ),
+                timeout=OLLAMA_TIMEOUT_ANALYZE,
+            )
 
         new_score, new_sentiment, summary_str, new_facts = parse_llm_response(response['message']['content'])
 
@@ -346,8 +431,16 @@ async def analyze_and_update_event(
         if (score_updated or promoted or profile_updated) and emit_callback:
             emit_callback(event)
 
+    except asyncio.TimeoutError:
+        print(f"⏱️  [Analyst] analyze_and_update_event timed out after {OLLAMA_TIMEOUT_ANALYZE}s for event {event.id}")
+        log_error("analyst.analyze_and_update_event", "ollama chat timeout",
+                  timeout_s=OLLAMA_TIMEOUT_ANALYZE, event_id=event.id)
     except Exception as e:
-        print(f"[Analyst] ERROR: Ollama call failed for event {event.id}: {e}")
+        kind = type(e).__name__
+        detail = str(e) or repr(e)
+        print(f"[Analyst] ERROR ({kind}): Ollama call failed for event {event.id}: {detail}")
+        log_error("analyst.analyze_and_update_event", "ollama chat error",
+                  exc=e, event_id=event.id)
 
 
 async def trigger_nami_interjection(event: EventItem, urgency_score: float, is_interrupt: bool = False) -> bool:
@@ -434,11 +527,15 @@ async def generate_summary(store: ContextStore):
     raw_context, full_prompt = build_summary_prompt(layers)
 
     try:
-        response = await ollama_client.chat(
-            model=OLLAMA_MODEL,
-            messages=[{'role': 'user', 'content': full_prompt}],
-            options={"temperature": 0.3}
-        )
+        async with get_ollama_gate():
+            response = await asyncio.wait_for(
+                ollama_client.chat(
+                    model=OLLAMA_MODEL,
+                    messages=[{'role': 'user', 'content': full_prompt}],
+                    options={"temperature": 0.3}
+                ),
+                timeout=OLLAMA_TIMEOUT_SUMMARY,
+            )
         full_response = response['message']['content'].strip()
 
         summary_text = full_response
@@ -479,5 +576,12 @@ async def generate_summary(store: ContextStore):
 
         store.set_summary(summary_text, raw_context, [], [], prediction_text)
 
+    except asyncio.TimeoutError:
+        print(f"⏱️  [Analyst] generate_summary timed out after {OLLAMA_TIMEOUT_SUMMARY}s")
+        log_error("analyst.generate_summary", "ollama chat timeout",
+                  timeout_s=OLLAMA_TIMEOUT_SUMMARY)
     except Exception as e:
-        print(f"[Analyst] Summary error: {e}")
+        kind = type(e).__name__
+        detail = str(e) or repr(e)
+        print(f"[Analyst] Summary error ({kind}): {detail}")
+        log_error("analyst.generate_summary", "ollama chat error", exc=e)

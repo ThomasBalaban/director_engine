@@ -1,8 +1,21 @@
 # Save as: director_engine/context/context_compression.py
+import asyncio
 import time
 import ollama
 from context.context_store import ContextStore, EventItem
-from config import OLLAMA_MODEL, COMPRESSION_INTERVAL, InputSource
+from config import OLLAMA_MODEL, OLLAMA_TIMEOUT_COMPRESS, COMPRESSION_INTERVAL, InputSource
+from services.ollama_gate import get_ollama_gate
+from diagnostics import log_error
+
+# Reused client — creating a fresh ollama.AsyncClient() on each call wastes
+# setup overhead. One module-level instance is fine for httpx-based clients.
+_shared_ollama_client = None
+
+def _get_client() -> ollama.AsyncClient:
+    global _shared_ollama_client
+    if _shared_ollama_client is None:
+        _shared_ollama_client = ollama.AsyncClient()
+    return _shared_ollama_client
 
 class ContextCompressor:
     def __init__(self):
@@ -69,10 +82,13 @@ class ContextCompressor:
         )
 
         try:
-            client = ollama.AsyncClient()
-            response = await client.generate(model=OLLAMA_MODEL, prompt=prompt)
+            async with get_ollama_gate():
+                response = await asyncio.wait_for(
+                    _get_client().generate(model=OLLAMA_MODEL, prompt=prompt),
+                    timeout=OLLAMA_TIMEOUT_COMPRESS,
+                )
             narrative = response['response'].strip()
-            
+
             # Skip if nothing memorable
             if "[SKIP]" in narrative.upper() or not narrative:
                 print(f"📖 [Compressor] No memorable moment found, skipping.")
@@ -109,8 +125,15 @@ class ContextCompressor:
             else:
                 print(f"📖 [Compressor] Result too short, skipping: {narrative}")
                 
+        except asyncio.TimeoutError:
+            print(f"⏱️  [Compressor] Recent-compress Ollama call timed out after {OLLAMA_TIMEOUT_COMPRESS}s")
+            log_error("compressor.recent", "ollama generate timeout",
+                      timeout_s=OLLAMA_TIMEOUT_COMPRESS)
         except Exception as e:
-            print(f"❌ [Compressor] Error: {e}")
+            kind = type(e).__name__
+            detail = str(e) or repr(e)
+            print(f"❌ [Compressor] Error ({kind}): {detail}")
+            log_error("compressor.recent", "ollama generate error", exc=e)
 
     async def _compress_ancient(self, store: ContextStore):
         """
@@ -137,8 +160,11 @@ class ContextCompressor:
         )
 
         try:
-            client = ollama.AsyncClient()
-            response = await client.generate(model=OLLAMA_MODEL, prompt=prompt)
+            async with get_ollama_gate():
+                response = await asyncio.wait_for(
+                    _get_client().generate(model=OLLAMA_MODEL, prompt=prompt),
+                    timeout=OLLAMA_TIMEOUT_COMPRESS,
+                )
             ancient_summary = response['response'].strip()
             
             # Clean up
@@ -152,5 +178,12 @@ class ContextCompressor:
                     store.narrative_log = store.narrative_log[5:]
                     store.archive_ancient_history(ancient_summary)
                 print(f"📜 [History] Archived: {ancient_summary[:60]}...")
+        except asyncio.TimeoutError:
+            print(f"⏱️  [Compressor] Ancient-compress Ollama call timed out after {OLLAMA_TIMEOUT_COMPRESS}s")
+            log_error("compressor.ancient", "ollama generate timeout",
+                      timeout_s=OLLAMA_TIMEOUT_COMPRESS)
         except Exception as e:
-            print(f"❌ [Compressor] Ancient compression error: {e}")
+            kind = type(e).__name__
+            detail = str(e) or repr(e)
+            print(f"❌ [Compressor] Ancient compression error ({kind}): {detail}")
+            log_error("compressor.ancient", "ollama generate error", exc=e)

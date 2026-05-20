@@ -60,7 +60,11 @@ class ContextStore:
         
         self.pending_memories_to_save: List[Dict[str, Any]] = []
         self.thread_manager = ConversationThreadManager()
-        self.lock = threading.Lock()
+        # RLock, not Lock: methods on the store frequently call each other while
+        # the outer caller holds the lock (e.g. _compress_ancient grabs the lock
+        # to slice narrative_log, then calls archive_ancient_history which also
+        # takes self.lock → deadlock on a plain Lock, freezing the asyncio loop).
+        self.lock = threading.RLock()
         
         self.pending_speech_event: Optional[EventItem] = None
         self.pending_speech_lock = threading.Lock()
@@ -173,11 +177,15 @@ class ContextStore:
             self.ancient_history_log.append(summary_text)
             print(f"📜 [History] Archived ancient block: {summary_text[:50]}...")
 
+    # Hard cap to prevent unbounded growth when the hub is disconnected or slow.
+    # When the queue exceeds this, drop the oldest entry (least important by recency).
+    PENDING_MEMORIES_MAX = 100
+
     def promote_to_memory(self, event: EventItem, summary_text: str = None):
         with self.lock:
             event.memory_text = summary_text if summary_text else event.text
             print(f"💾 [Memory] Flagged for remote storage: {event.memory_text[:50]}...")
-            
+
             # Queue it up for the main loop to emit via Socket.IO
             self.pending_memories_to_save.append({
                 "id": event.id,
@@ -186,6 +194,12 @@ class ContextStore:
                 "memory_text": event.memory_text,
                 "importance": event.score.interestingness
             })
+
+            # Cap queue depth — drops oldest if hub has been unreachable
+            if len(self.pending_memories_to_save) > self.PENDING_MEMORIES_MAX:
+                overflow = len(self.pending_memories_to_save) - self.PENDING_MEMORIES_MAX
+                self.pending_memories_to_save = self.pending_memories_to_save[overflow:]
+                print(f"⚠️  [Memory] Pending-save queue trimmed ({overflow} oldest dropped)")
 
     def update_mood(self, sentiment: str):
         if not sentiment: return

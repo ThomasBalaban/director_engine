@@ -19,6 +19,9 @@ class BehaviorEngine:
         self.last_curiosity_check = time.time()
         self.last_callback_check = time.time()
         self.attention_lock_duration = 5.0
+        # Tracks whether a fire-and-forget generate_thought is currently in
+        # flight. Prevents queueing duplicate tasks when Ollama is slow.
+        self._monologue_task_inflight = False
 
     def update_goal(self, store: ContextStore):
         # Scene override: if Otter is quiet and game is busy, lock OBSERVE.
@@ -91,17 +94,17 @@ class BehaviorEngine:
                 return f"Wait, you never told me: {debt.text}"
         return None
 
-    async def check_internal_monologue(self, store: ContextStore) -> Optional[str]:
+    async def check_internal_monologue(self, store: ContextStore) -> None:
         """
-        Generates a spontaneous thought during silence.
+        Decide whether to generate a spontaneous thought, and if so, kick off
+        the LLM call as a fire-and-forget background task.
 
-        Builds grounded context so Llama knows:
-        1. Who Nami is (PeepingNami, PeepingOtter's companion)
-        2. Whether she's watching Otter or watching someone else with Otter
-        3. What is actually happening right now (scene + summary)
+        Returns None always — the spawned task adds the resulting event to
+        the store directly. This decouples reflex_ticker's iteration rate
+        from Ollama latency: if Ollama takes 13s, the reflex loop still
+        runs at 1Hz; the thought just appears in the store ~13s later.
 
-        The watching_context if/else prevents Llama from inventing fictional
-        universes — it stays anchored to the real situation on screen.
+        Dedup: at most ONE monologue task in flight at a time.
         """
         now = time.time()
 
@@ -115,6 +118,10 @@ class BehaviorEngine:
             interval = CURIOSITY_INTERVAL * 0.5
 
         if now - self.last_curiosity_check < interval:
+            return None
+
+        # Already generating one — don't queue another
+        if self._monologue_task_inflight:
             return None
 
         import shared
@@ -171,14 +178,51 @@ class BehaviorEngine:
         elif store.current_entities:
             topic = f"the {random.choice(store.current_entities)}"
 
-        print(f"💭 [Monologue] Generating thought | topic: {topic} | scene: {scene_name}")
+        # Fire and forget — does NOT block this iteration
+        self._monologue_task_inflight = True
+        asyncio.create_task(self._run_monologue_generation(
+            topic, stream_context, watching_context, scene_name, store
+        ))
+        return None
 
-        thought = await llm_analyst.generate_thought(
-            prompt_text=f"A weird or funny observation about {topic}",
-            stream_context=stream_context,
-            watching_context=watching_context,
-        )
-        return thought
+    async def _run_monologue_generation(
+        self,
+        topic: str,
+        stream_context: str,
+        watching_context: str,
+        scene_name: str,
+        store: ContextStore,
+    ) -> None:
+        """
+        Background task that actually calls Ollama for the monologue.
+        Decoupled from reflex_ticker so Ollama latency doesn't block the loop.
+        """
+        import shared
+        import config as _cfg
+
+        try:
+            print(f"💭 [Monologue] Generating thought | topic: {topic} | scene: {scene_name}")
+
+            thought = await llm_analyst.generate_thought(
+                prompt_text=f"A weird or funny observation about {topic}",
+                stream_context=stream_context,
+                watching_context=watching_context,
+            )
+
+            if thought:
+                print(f"💡 [Reflex] Thought: {thought}")
+                thought_event = store.add_event(
+                    _cfg.InputSource.INTERNAL_THOUGHT, thought,
+                    {"type": "shower_thought", "goal": "fill_silence"},
+                    EventScore(interestingness=0.95, conversational_value=1.0, urgency=0.8)
+                )
+                shared.emit_event_scored(thought_event)
+        except Exception as e:
+            kind = type(e).__name__
+            detail = str(e) or repr(e)
+            print(f"⚠️ [Monologue] Background generation failed ({kind}): {detail}")
+        finally:
+            self._monologue_task_inflight = False
 
     # Alias for backwards compatibility
     check_curiosity = check_internal_monologue
