@@ -109,10 +109,10 @@ async def process_engine_event(
     is_direct_address = source == config.InputSource.DIRECT_MICROPHONE
     
     if source == config.InputSource.TWITCH_MENTION:
-        mention_username = (username or metadata.get('username', '')).lower()
-        mention_text = text.lower()
-        if mention_username == 'peepingotter' and 'nami' in mention_text:
-            is_direct_address = True
+        # twitch_service already gated this on the (nami|peepingnami) regex,
+        # so the source tag itself is sufficient — every chat user who @s her
+        # counts as a direct address.
+        is_direct_address = True
     
     if is_direct_address:
         # Tell prompt service: user spoke, clear awaiting state

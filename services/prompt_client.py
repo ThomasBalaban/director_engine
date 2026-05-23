@@ -6,11 +6,41 @@ The brain fires speech requests here. The prompt service
 decides what actually reaches Nami.
 """
 
+import time
 import httpx
 from typing import Dict, Any, Optional
 from config import PROMPT_SERVICE_URL
 
 _client: Optional[httpx.AsyncClient] = None
+
+# ── Reply-mode cache ──────────────────────────────────────────────────────────
+# The brain needs to know the gate's reply_mode to filter proactive guidance
+# out of prompts. Cheap localhost call but cached to avoid hammering on every
+# prompt build.
+_REPLY_MODE_TTL_S = 3.0
+_reply_mode_cache: str = "off"
+_reply_mode_cache_ts: float = 0.0
+
+
+async def get_reply_mode() -> str:
+    """Return the current gate reply_mode ("off" / "reply_only" / "reply_plus_urgent")."""
+    global _reply_mode_cache, _reply_mode_cache_ts
+    now = time.monotonic()
+    if now - _reply_mode_cache_ts < _REPLY_MODE_TTL_S:
+        return _reply_mode_cache
+    if not _client:
+        await initialize()
+    try:
+        r = await _client.get(f"{PROMPT_SERVICE_URL}/reply_mode", timeout=1.5)
+        if r.status_code == 200:
+            mode = r.json().get("mode")
+            if isinstance(mode, str):
+                _reply_mode_cache = mode
+                _reply_mode_cache_ts = now
+    except Exception:
+        # Fail open — keep last known value rather than guessing wrong.
+        _reply_mode_cache_ts = now
+    return _reply_mode_cache
 
 # ── In-flight backpressure ────────────────────────────────────────────────────
 # Each request_speech spawns an HTTP POST. Under reflex-trigger floods these

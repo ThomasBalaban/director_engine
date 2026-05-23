@@ -47,7 +47,8 @@ class StructuredPromptFormatter:
         conversation_log: str,
         user_is_speaking: bool,
         manual_context: str = "",
-        current_streamer: str = ""
+        current_streamer: str = "",
+        suppress_proactive: bool = False,
     ) -> str:
         """
         Build the complete structured prompt.
@@ -65,29 +66,34 @@ class StructuredPromptFormatter:
         if user_is_speaking:
             # User talking = conversation priority
             sections.extend(self._build_conversation_focused_prompt(
-                directive, store, visual_summary, conversation_log, memories
+                directive, store, visual_summary, conversation_log, memories,
+                suppress_proactive=suppress_proactive,
             ))
         else:
-            # Silence/gameplay = commentary priority  
+            # Silence/gameplay = commentary priority
             sections.extend(self._build_gameplay_focused_prompt(
-                directive, store, visual_summary, conversation_log, memories
+                directive, store, visual_summary, conversation_log, memories,
+                suppress_proactive=suppress_proactive,
             ))
         
         # Join all sections
         return "\n\n".join(sections)
     
     def _build_conversation_focused_prompt(
-        self, directive, store, visual_summary, conversation_log, memories
+        self, directive, store, visual_summary, conversation_log, memories,
+        suppress_proactive: bool = False,
     ) -> List[str]:
         """User is actively talking - prioritize interaction."""
         sections = []
-        
+
         # 1. DIRECTIVE (Critical instructions)
         if directive:
             sections.append(self._format_directive(directive, priority="CRITICAL"))
 
         # 1b. HOST STATE (is Otter actively talking?)
-        sections.append(self._format_host_state(store))
+        host_block = self._format_host_state(store, suppress_proactive=suppress_proactive)
+        if host_block:
+            sections.append(host_block)
 
         # 2. USER CONTEXT (Who we're talking to)
         if store.active_user_profile:
@@ -112,17 +118,20 @@ class StructuredPromptFormatter:
         return sections
     
     def _build_gameplay_focused_prompt(
-        self, directive, store, visual_summary, conversation_log, memories
+        self, directive, store, visual_summary, conversation_log, memories,
+        suppress_proactive: bool = False,
     ) -> List[str]:
         """User is quiet - prioritize gameplay commentary."""
         sections = []
-        
+
         # 1. DIRECTIVE
         if directive:
             sections.append(self._format_directive(directive, priority="CRITICAL"))
 
         # 1b. HOST STATE (is Otter actively talking?)
-        sections.append(self._format_host_state(store))
+        host_block = self._format_host_state(store, suppress_proactive=suppress_proactive)
+        if host_block:
+            sections.append(host_block)
 
         # 2. SCENE STATE + VISUALS (Main focus)
         sections.append(f"""<focus type="GAMEPLAY" priority="HIGH">
@@ -146,8 +155,16 @@ class StructuredPromptFormatter:
         
         return sections
     
-    def _format_host_state(self, store: ContextStore) -> str:
-        """Surface Otter's mic activity so the LLM knows whether to pull focus."""
+    def _format_host_state(self, store: ContextStore, suppress_proactive: bool = False) -> str:
+        """Surface Otter's mic activity so the LLM knows whether to pull focus.
+
+        In reply-only modes, the proactive "fill the gap" guidance is dropped
+        entirely — there's nothing for Nami to fill, and the brief shouldn't
+        push her to volunteer chatter when she only ever speaks on direct
+        address.
+        """
+        if suppress_proactive:
+            return ""
         state = store.host_state.name
         hint = {
             "ACTIVE": "Otter is talking. Don't pull focus — quick reactions only, no rambling.",

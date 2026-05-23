@@ -45,16 +45,24 @@ class PromptConstructor:
         self.formatter = StructuredPromptFormatter()
         print("✅ [PromptConstructor] Controllers initialized")
 
-    async def construct_context_block(self, 
-                          store: ContextStore, 
-                          directive: Directive, 
+    async def construct_context_block(self,
+                          store: ContextStore,
+                          directive: Directive,
                           memories: List[Dict[str, Any]]) -> str:
         import shared
-        
+        from services import prompt_client
+
+        # Reply-mode-aware prompt building: when the gate is in reply_only or
+        # reply_plus_urgent, drop proactive "fill the silence" guidance and
+        # past internal thoughts so a direct-address reply isn't colored by
+        # commentary that never reached chat anyway.
+        reply_mode = await prompt_client.get_reply_mode()
+        suppress_proactive = reply_mode != "off"
+
         # [NEW] Determine detail level
         detail_mode = self.detail_controller.select_detail_mode(store)
         limits = self.detail_controller.get_limits(detail_mode)
-        
+
         # Get raw event layers
         layers = store.get_all_events_for_summary()
         
@@ -79,6 +87,14 @@ class PromptConstructor:
         seen_ids = {e.id for e in active_events}
         periphery_to_add = [e for e in background_periphery if e.id not in seen_ids]
         active_events = periphery_to_add + active_events
+
+        # Strip Nami's own past proactive thoughts when she's been gagged —
+        # they'd otherwise leak into the conversation log and bias replies.
+        if suppress_proactive:
+            active_events = [
+                e for e in active_events
+                if e.source != InputSource.INTERNAL_THOUGHT
+            ]
 
         # Sort chronologically
         active_events.sort(key=lambda x: x.timestamp)
@@ -110,7 +126,8 @@ class PromptConstructor:
             conversation_log=log_str,
             user_is_speaking=user_is_speaking,
             manual_context=shared.get_manual_context(),
-            current_streamer=shared.get_current_streamer()
+            current_streamer=shared.get_current_streamer(),
+            suppress_proactive=suppress_proactive,
         )
         
         # [NEW] Inject thread context if present
