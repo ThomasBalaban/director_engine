@@ -1,21 +1,81 @@
 # Save as: director_engine/context/context_compression.py
 import asyncio
+import json
 import time
-import ollama
+from typing import Any, Optional
+
+import google.generativeai as genai  # type: ignore
+from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
+
 from context.context_store import ContextStore, EventItem
-from config import OLLAMA_MODEL, OLLAMA_TIMEOUT_COMPRESS, COMPRESSION_INTERVAL, InputSource
-from services.ollama_gate import get_ollama_gate
+from config import OLLAMA_TIMEOUT_COMPRESS, COMPRESSION_INTERVAL, InputSource, GEMINI_API_KEY
 from diagnostics import log_error
 
-# Reused client — creating a fresh ollama.AsyncClient() on each call wastes
-# setup overhead. One module-level instance is fine for httpx-based clients.
-_shared_ollama_client = None
+# Switched from Ollama to Gemini 2.0 Flash for narrative/ancient compression.
+# Rationale:
+#  - Same hallucination class as the summary path: loose prompt + sparse data
+#    causes the model to invent quotes and details (notes.md 2026-05-21).
+#    Concrete observed failure: user asked "what is the square root of pi",
+#    Nami answered with the airhorn pie joke, narrative_log captured an
+#    invented "silence and slow Uh" response that never happened.
+#  - JSON-structured output lets us return a strict is_memorable boolean,
+#    so the model can explicitly decline instead of always inventing
+#    something to satisfy the "Memorable moment:" completion.
+#  - BOT_TWITCH_REPLY now has its own source label so the LLM can tell
+#    question from answer instead of guessing.
 
-def _get_client() -> ollama.AsyncClient:
-    global _shared_ollama_client
-    if _shared_ollama_client is None:
-        _shared_ollama_client = ollama.AsyncClient()
-    return _shared_ollama_client
+_gemini_compress_model: Optional[Any] = None
+
+
+def _get_gemini_model() -> Optional[Any]:
+    global _gemini_compress_model
+    if _gemini_compress_model is None and GEMINI_API_KEY:
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            safety_settings = {
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+            _gemini_compress_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                safety_settings=safety_settings,
+            )
+            print("[Compressor] ✅ Gemini compression model initialized (gemini-2.0-flash)")
+        except Exception as e:
+            print(f"[Compressor] ❌ Failed to init Gemini compression model: {e}")
+    return _gemini_compress_model
+
+
+_SOURCE_LABELS = {
+    InputSource.MICROPHONE: "Streamer said",
+    InputSource.DIRECT_MICROPHONE: "Streamer said",
+    InputSource.TWITCH_CHAT: "Chat",
+    InputSource.TWITCH_MENTION: "Chat @Nami",
+    InputSource.BOT_TWITCH_REPLY: "Nami replied",
+    InputSource.VISUAL_CHANGE: "On screen",
+    InputSource.AMBIENT_AUDIO: "Audio",
+    InputSource.SYSTEM_PATTERN: "Event",
+}
+
+
+_RECENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "is_memorable": {"type": "boolean"},
+        "narrative": {"type": "string"},
+    },
+    "required": ["is_memorable", "narrative"],
+}
+
+_ANCIENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+    },
+    "required": ["summary"],
+}
 
 class ContextCompressor:
     def __init__(self):
@@ -39,101 +99,91 @@ class ContextCompressor:
         layers = store.get_all_events_for_summary()
         background_events = layers['background']
         if not background_events and len(layers['recent']) > 5:
-             background_events = layers['recent']
+            background_events = layers['recent']
 
-        if not background_events: 
+        if not background_events:
             return
-        
-        # Build richer context with source info
+
+        model = _get_gemini_model()
+        if model is None:
+            print("[Compressor] ⚠️  Gemini unavailable — skipping narrative compression")
+            return
+
+        # Format events with explicit source labels. BOT_TWITCH_REPLY is now
+        # labeled "Nami replied" so the LLM can match questions to actual
+        # responses instead of inventing them.
         context_lines = []
         for e in background_events:
-            source_label = {
-                InputSource.MICROPHONE: "Streamer said",
-                InputSource.DIRECT_MICROPHONE: "Streamer said",
-                InputSource.TWITCH_CHAT: "Chat",
-                InputSource.TWITCH_MENTION: "Chat @Nami",
-                InputSource.VISUAL_CHANGE: "On screen",
-                InputSource.AMBIENT_AUDIO: "Audio",
-                InputSource.SYSTEM_PATTERN: "Event",
-            }.get(e.source, "Event")
-            
-            context_lines.append(f"- [{source_label}] {e.text}")
-        
+            label = _SOURCE_LABELS.get(e.source, "Event")
+            context_lines.append(f"- [{label}] {e.text}")
         context_text = "\n".join(context_lines)
-        
-        # --- IMPROVED PROMPT: Extract specific memorable moments ---
+
         prompt = (
-            f"You are extracting memorable moments from a livestream for later callback.\n\n"
-            f"Stream events:\n{context_text}\n\n"
-            f"Extract ONE specific memorable moment that Nami (the AI) could reference later.\n"
-            f"Format: '[What happened] - [The funny/notable detail]'\n\n"
-            f"Good examples:\n"
-            f"- 'Otter rage-quit after spinning a 1 three times in a row'\n"
-            f"- 'Chat convinced Otter to pick the Space Janitor job'\n"
-            f"- 'Otter celebrated winning then immediately got hit with 50k taxes'\n"
-            f"- 'Someone in chat called Otter a skill issue and he malded'\n\n"
-            f"Bad examples (too vague/meta):\n"
-            f"- 'The streamer played a game and had reactions'\n"
-            f"- 'Various events occurred during gameplay'\n"
-            f"- 'The user engaged with chat while gaming'\n\n"
-            f"Be specific. Use names/usernames when available. Include the emotion or punchline.\n"
-            f"If nothing memorable happened, write: [SKIP]\n\n"
-            f"Memorable moment:"
+            "You extract one memorable moment from a livestream for later callback.\n\n"
+            f"Events (verbatim, in order):\n{context_text}\n\n"
+            "RULES:\n"
+            "1. The narrative MUST be derived from the events above. Do not invent\n"
+            "   actions, quotes, reactions, characters, or details that are not\n"
+            "   explicitly present in an event line.\n"
+            "2. When referencing what someone said, use only what appears after\n"
+            "   the source label. Never paraphrase a 'Nami replied' line into\n"
+            "   something Nami didn't actually say. Never invent a Nami response\n"
+            "   if no 'Nami replied' line is present.\n"
+            "3. Do not infer emotions, tones, or delivery (\"flat tone\", \"awkward\n"
+            "   pause\", \"sarcastically\") unless an event line literally states it.\n"
+            "4. If the events show nothing genuinely memorable — routine chat,\n"
+            "   ambient noise, idle game state, or just a single isolated line —\n"
+            "   return is_memorable=false. Routine is acceptable; inventing is not.\n"
+            "5. If is_memorable=true, the narrative is ONE sentence describing\n"
+            "   what specifically happened, grounded in the event lines.\n"
+            "6. If is_memorable=false, narrative MUST be the empty string.\n\n"
+            "Return a JSON object with: is_memorable (boolean), narrative (string)."
         )
 
         try:
-            async with get_ollama_gate():
-                response = await asyncio.wait_for(
-                    _get_client().generate(model=OLLAMA_MODEL, prompt=prompt),
-                    timeout=OLLAMA_TIMEOUT_COMPRESS,
-                )
-            narrative = response['response'].strip()
-
-            # Skip if nothing memorable
-            if "[SKIP]" in narrative.upper() or not narrative:
-                print(f"📖 [Compressor] No memorable moment found, skipping.")
-                return
-            
-            # Post-processing cleanup
-            # Remove common AI preambles
-            cleanup_phrases = [
-                "here is", "here's", "the memorable moment is", 
-                "memorable moment:", "one memorable moment"
-            ]
-            narrative_lower = narrative.lower()
-            for phrase in cleanup_phrases:
-                if narrative_lower.startswith(phrase):
-                    narrative = narrative[len(phrase):].strip()
-                    if narrative.startswith(":"):
-                        narrative = narrative[1:].strip()
-                    break
-            
-            # Remove quotes if wrapped
-            if narrative.startswith('"') and narrative.endswith('"'):
-                narrative = narrative[1:-1]
-            if narrative.startswith("'") and narrative.endswith("'"):
-                narrative = narrative[1:-1]
-
-            if "\nNote:" in narrative:
-                narrative = narrative.split("\nNote:")[0].strip()
-            if narrative.lower().startswith("note:"):
-                narrative = "" 
-                
-            if narrative and len(narrative) > 10:
-                store.add_narrative_segment(narrative)
-                print(f"📖 [Compressor] Added: {narrative[:60]}...")
-            else:
-                print(f"📖 [Compressor] Result too short, skipping: {narrative}")
-                
+            response = await asyncio.wait_for(
+                model.generate_content_async(
+                    prompt,
+                    generation_config={
+                        "temperature": 0.1,
+                        "response_mime_type": "application/json",
+                        "response_schema": _RECENT_SCHEMA,
+                    },
+                ),
+                timeout=OLLAMA_TIMEOUT_COMPRESS,
+            )
         except asyncio.TimeoutError:
-            print(f"⏱️  [Compressor] Recent-compress Ollama call timed out after {OLLAMA_TIMEOUT_COMPRESS}s")
-            log_error("compressor.recent", "ollama generate timeout",
-                      timeout_s=OLLAMA_TIMEOUT_COMPRESS)
+            print(f"⏱️  [Compressor] Recent-compress timed out after {OLLAMA_TIMEOUT_COMPRESS}s")
+            log_error("compressor.recent", "gemini timeout", timeout_s=OLLAMA_TIMEOUT_COMPRESS)
+            return
         except Exception as e:
             kind = type(e).__name__
             detail = str(e) or repr(e)
             print(f"❌ [Compressor] Error ({kind}): {detail}")
-            log_error("compressor.recent", "ollama generate error", exc=e)
+            log_error("compressor.recent", "gemini error", exc=e)
+            return
+
+        try:
+            data = json.loads(response.text)
+        except (json.JSONDecodeError, AttributeError, ValueError) as e:
+            print(f"[Compressor] Recent JSON parse failed: {e}")
+            return
+
+        if not data.get("is_memorable"):
+            print("📖 [Compressor] No memorable moment found, skipping.")
+            return
+
+        narrative = (data.get("narrative") or "").strip()
+        if narrative.startswith('"') and narrative.endswith('"'):
+            narrative = narrative[1:-1]
+        if narrative.startswith("'") and narrative.endswith("'"):
+            narrative = narrative[1:-1]
+
+        if narrative and len(narrative) > 10:
+            store.add_narrative_segment(narrative)
+            print(f"📖 [Compressor] Added: {narrative[:60]}...")
+        else:
+            print(f"📖 [Compressor] is_memorable=true but narrative too short, skipping: {narrative!r}")
 
     async def _compress_ancient(self, store: ContextStore):
         """
@@ -142,48 +192,63 @@ class ContextCompressor:
         with store.lock:
             if len(store.narrative_log) < 10:
                 return
-
             chunk_to_compress = store.narrative_log[:5]
-            
+
         print(f"📚 [Compressor] Compressing {len(chunk_to_compress)} narrative segments into Ancient History...")
-        
-        context_text = "\n".join([f"- {seg}" for seg in chunk_to_compress])
-        
-        # --- IMPROVED PROMPT for ancient history ---
+
+        model = _get_gemini_model()
+        if model is None:
+            print("[Compressor] ⚠️  Gemini unavailable — skipping ancient compression")
+            return
+
+        context_text = "\n".join(f"- {seg}" for seg in chunk_to_compress)
+
         prompt = (
-            f"These are memorable moments from earlier in a livestream:\n"
-            f"{context_text}\n\n"
-            f"Combine these into ONE sentence that captures the key callbacks.\n"
-            f"Focus on: names, specific events, running jokes, or notable fails/wins.\n"
-            f"Example: 'Earlier, Otter lost 3 games in a row, chat roasted him, and he blamed the RNG.'\n\n"
-            f"Combined summary:"
+            "Combine these earlier memorable moments into one sentence for long-term recall.\n\n"
+            f"Moments:\n{context_text}\n\n"
+            "RULES:\n"
+            "1. Use ONLY information present in the moments above. Do not add new\n"
+            "   details, characters, jokes, or events.\n"
+            "2. Preserve names and specifics that appear verbatim.\n"
+            "3. One sentence. No quotes around it. No preamble like 'Earlier,'.\n\n"
+            "Return JSON with: summary (string)."
         )
 
         try:
-            async with get_ollama_gate():
-                response = await asyncio.wait_for(
-                    _get_client().generate(model=OLLAMA_MODEL, prompt=prompt),
-                    timeout=OLLAMA_TIMEOUT_COMPRESS,
-                )
-            ancient_summary = response['response'].strip()
-            
-            # Clean up
-            if ancient_summary.lower().startswith("combined summary:"):
-                ancient_summary = ancient_summary[17:].strip()
-            if ancient_summary.startswith('"') and ancient_summary.endswith('"'):
-                ancient_summary = ancient_summary[1:-1]
-            
-            if ancient_summary and len(ancient_summary) > 15:
-                with store.lock:
-                    store.narrative_log = store.narrative_log[5:]
-                    store.archive_ancient_history(ancient_summary)
-                print(f"📜 [History] Archived: {ancient_summary[:60]}...")
+            response = await asyncio.wait_for(
+                model.generate_content_async(
+                    prompt,
+                    generation_config={
+                        "temperature": 0.1,
+                        "response_mime_type": "application/json",
+                        "response_schema": _ANCIENT_SCHEMA,
+                    },
+                ),
+                timeout=OLLAMA_TIMEOUT_COMPRESS,
+            )
         except asyncio.TimeoutError:
-            print(f"⏱️  [Compressor] Ancient-compress Ollama call timed out after {OLLAMA_TIMEOUT_COMPRESS}s")
-            log_error("compressor.ancient", "ollama generate timeout",
-                      timeout_s=OLLAMA_TIMEOUT_COMPRESS)
+            print(f"⏱️  [Compressor] Ancient-compress timed out after {OLLAMA_TIMEOUT_COMPRESS}s")
+            log_error("compressor.ancient", "gemini timeout", timeout_s=OLLAMA_TIMEOUT_COMPRESS)
+            return
         except Exception as e:
             kind = type(e).__name__
             detail = str(e) or repr(e)
             print(f"❌ [Compressor] Ancient compression error ({kind}): {detail}")
-            log_error("compressor.ancient", "ollama generate error", exc=e)
+            log_error("compressor.ancient", "gemini error", exc=e)
+            return
+
+        try:
+            data = json.loads(response.text)
+        except (json.JSONDecodeError, AttributeError, ValueError) as e:
+            print(f"[Compressor] Ancient JSON parse failed: {e}")
+            return
+
+        ancient_summary = (data.get("summary") or "").strip()
+        if ancient_summary.startswith('"') and ancient_summary.endswith('"'):
+            ancient_summary = ancient_summary[1:-1]
+
+        if ancient_summary and len(ancient_summary) > 15:
+            with store.lock:
+                store.narrative_log = store.narrative_log[5:]
+                store.archive_ancient_history(ancient_summary)
+            print(f"📜 [History] Archived: {ancient_summary[:60]}...")

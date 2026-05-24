@@ -10,13 +10,15 @@ import ollama
 import json
 import httpx
 import asyncio
+import google.generativeai as genai  # type: ignore
+from google.generativeai.types import HarmCategory, HarmBlockThreshold  # type: ignore
 from config import (
     OLLAMA_MODEL, OLLAMA_HOST,
     OLLAMA_TIMEOUT_THOUGHT, OLLAMA_TIMEOUT_ANALYZE,
     OLLAMA_TIMEOUT_SUMMARY, OLLAMA_TIMEOUT_CTX_INFER,
     INTERJECTION_THRESHOLD, InputSource,
     ConversationState, FlowState, UserIntent,
-    OWNER_STREAMER_ID
+    OWNER_STREAMER_ID, GEMINI_API_KEY
 )
 from context.context_store import ContextStore, EventItem
 from context.user_profile_manager import UserProfileManager
@@ -28,6 +30,14 @@ from typing import List, Tuple, Callable, Any, Optional, Dict
 # Global Async Clients
 http_client: httpx.AsyncClient | None = None
 ollama_client: ollama.AsyncClient | None = None
+
+# Gemini model for the situation summarizer. Kept separate from Ollama because
+# the summary path needs JSON-structured output and strict grounding — Ollama
+# was producing hallucinations and template fixations under sparse input.
+gemini_summary_model: Optional[Any] = None
+
+NO_ACTIVITY_SUMMARY = "(No current activity observed.)"
+UNAVAILABLE_SUMMARY = "(Summary unavailable.)"
 
 # --- Context Inference State ---
 _context_inference_running = False
@@ -61,7 +71,7 @@ def _get_analyze_sem() -> asyncio.Semaphore:
     return _analyze_sem
 
 async def create_http_client():
-    global http_client, ollama_client
+    global http_client, ollama_client, gemini_summary_model
     if http_client is None:
         http_client = httpx.AsyncClient()
     if ollama_client is None:
@@ -70,6 +80,22 @@ async def create_http_client():
             print(f"[Analyst] ✅ Async Ollama Client connected at {OLLAMA_HOST}")
         except Exception as e:
             print(f"[Analyst] ❌ Failed to connect to Ollama: {e}")
+    if gemini_summary_model is None and GEMINI_API_KEY:
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+            safety_settings = {
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+            gemini_summary_model = genai.GenerativeModel(
+                'gemini-2.0-flash',
+                safety_settings=safety_settings,
+            )
+            print("[Analyst] ✅ Gemini summary model initialized (gemini-2.0-flash)")
+        except Exception as e:
+            print(f"[Analyst] ❌ Failed to init Gemini summary model: {e}")
 
 async def close_http_client():
     global http_client
@@ -463,125 +489,196 @@ async def trigger_nami_interjection(event: EventItem, urgency_score: float, is_i
 
 
 # --- Summary Generation ---
+#
+# Switched from Ollama to Gemini 2.0 Flash for the situation summarizer.
+# Rationale:
+#  - JSON-structured output (response_mime_type) eliminates the text-parsing
+#    failure mode that previously dropped classifications when the model
+#    formatted its output slightly differently.
+#  - Strict grounding rules in the prompt + low temperature reduce the
+#    hallucination problem documented in notes.md (2026-05-17, 2026-05-21).
+#  - Bot replies (BOT_TWITCH_REPLY) are dropped from input so Nami's own
+#    past quips can't bias the next summary's framing — that was the
+#    template-fixation loop ("oxygen dropping faster than viewership"
+#    surviving even after oxygen recovered).
+#  - If the event layers are completely empty (which can now happen in
+#    reply_only mode or when vision/audio services aren't running), the
+#    summarizer short-circuits to a fixed "no activity" string WITHOUT
+#    calling the LLM at all — zero hallucination risk on empty input.
 
-def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str]:
-    def format_layer(events):
-        lines = []
-        for e in events:
-            source_map = {
-                InputSource.MICROPHONE: "User", InputSource.DIRECT_MICROPHONE: "User",
-                InputSource.TWITCH_CHAT: "Twitch", InputSource.TWITCH_MENTION: "Twitch",
-                InputSource.BOT_TWITCH_REPLY: "Nami", InputSource.AMBIENT_AUDIO: "Audio",
-                InputSource.VISUAL_CHANGE: "Vision", InputSource.SYSTEM_PATTERN: "Insight"
-            }
-            src = source_map.get(e.source, "Other")
-            lines.append(f"- [{src}] {e.text}")
-        return "\n".join(lines)
+# Sources whose contents are world observations (safe to summarize).
+# Excludes BOT_TWITCH_REPLY: summarizing Nami's own past commentary creates
+# a feedback loop where templates self-reinforce.
+_SUMMARY_INPUT_SOURCES = {
+    InputSource.MICROPHONE,
+    InputSource.DIRECT_MICROPHONE,
+    InputSource.TWITCH_CHAT,
+    InputSource.TWITCH_MENTION,
+    InputSource.AMBIENT_AUDIO,
+    InputSource.VISUAL_CHANGE,
+    InputSource.SYSTEM_PATTERN,
+}
 
-    immediate_txt = format_layer(layers['immediate']) or "None"
-    recent_txt = format_layer(layers['recent']) or "None"
-    background_txt = format_layer(layers['background'][-5:]) or "None"
 
-    prompt_context = f"""
-[IMMEDIATE EVENTS (Last 10s)]
-{immediate_txt}
+def _filter_for_summary(events: List[EventItem]) -> List[EventItem]:
+    return [e for e in events if e.source in _SUMMARY_INPUT_SOURCES]
+
+
+def build_summary_prompt(layers: Dict[str, List[EventItem]]) -> Tuple[str, str, int]:
+    """
+    Returns (raw_context_for_storage, llm_prompt, total_event_count).
+
+    total_event_count is 0 when every layer is empty after filtering — the
+    caller uses this to short-circuit before any LLM call.
+    """
+    source_map = {
+        InputSource.MICROPHONE: "User", InputSource.DIRECT_MICROPHONE: "User",
+        InputSource.TWITCH_CHAT: "Twitch", InputSource.TWITCH_MENTION: "Twitch",
+        InputSource.AMBIENT_AUDIO: "Audio", InputSource.VISUAL_CHANGE: "Vision",
+        InputSource.SYSTEM_PATTERN: "Insight",
+    }
+
+    def format_layer(events: List[EventItem]) -> str:
+        if not events:
+            return "(empty)"
+        return "\n".join(f"- [{source_map.get(e.source, 'Other')}] {e.text}" for e in events)
+
+    immediate = _filter_for_summary(layers.get('immediate', []))
+    recent = _filter_for_summary(layers.get('recent', []))
+    background = _filter_for_summary(layers.get('background', []))[-5:]
+
+    total = len(immediate) + len(recent) + len(background)
+
+    raw_context = f"""[IMMEDIATE EVENTS (Last 10s)]
+{format_layer(immediate)}
 
 [RECENT CONTEXT (Last 30s)]
-{recent_txt}
+{format_layer(recent)}
 
 [BACKGROUND CONTEXT (Earlier)]
-{background_txt}
+{format_layer(background)}
 """
 
-    conv_states = ", ".join([s.name for s in ConversationState])
-    flow_states = ", ".join([s.name for s in FlowState])
-    intent_states = ", ".join([s.name for s in UserIntent])
+    prompt = f"""You are a situation summarizer for a Twitch streaming AI.
 
-    prompt = f"""
-You are a situation summarizer.
-{prompt_context}
+Your job is to describe what is CURRENTLY observable, grounded strictly in the
+events listed below. You are not a writer, a comedian, or a storyteller.
 
-1. Summarize the CURRENT situation (1-2 sentences). Start with the 'vibe'.
-2. PREDICT what might happen next.
-3. CLASSIFY the current state.
+EVIDENCE:
+{raw_context}
 
-Respond using this format EXACTLY:
-[SUMMARY]
-<summary text>
+HARD RULES — these override any creative instinct:
+1. Use ONLY information present in the events above. Do not infer entities,
+   characters, objects, locations, emotions, or events that are not stated.
+2. IMMEDIATE EVENTS are ground truth for the current state. If IMMEDIATE
+   contradicts BACKGROUND, IMMEDIATE wins (e.g. if BACKGROUND said oxygen
+   was low and IMMEDIATE says oxygen is 75%, the current state is 75%).
+3. BACKGROUND is historical context only. Never lead a summary with it.
+   Never use it as the "current" situation.
+4. If IMMEDIATE is "(empty)", the current state is unknown. Say so plainly
+   ("No new activity in the last 10 seconds; last observed: ...") rather than
+   inventing detail.
+5. If ALL THREE layers are "(empty)", set summary to exactly:
+   "(No current activity observed.)"
+6. Do not echo or extend any prior commentary. You have not been shown
+   Nami's previous replies for a reason — do not invent them either.
+7. No metaphors, no jokes, no "vibe" descriptions. Describe what is on screen
+   or in the audio, factually. Other components handle the personality layer.
 
-[PREDICTION]
-<prediction text>
-
-[CLASSIFICATION]
-State: <{conv_states}>
-Flow: <{flow_states}>
-Intent: <{intent_states}>
+Produce one JSON object with these fields:
+- summary: 1-2 sentences. Plain factual description of current state.
+- prediction: 1 sentence. What might happen next, based only on evidence above.
+  Use "Unknown" if there is no basis for a prediction.
+- conversation_state: one of [{", ".join(s.name for s in ConversationState)}]
+- flow_state: one of [{", ".join(s.name for s in FlowState)}]
+- user_intent: one of [{", ".join(s.name for s in UserIntent)}]
 """
-    return prompt_context, prompt
+    return raw_context, prompt, total
+
+
+_SUMMARY_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "prediction": {"type": "string"},
+        "conversation_state": {
+            "type": "string",
+            "enum": [s.name for s in ConversationState],
+        },
+        "flow_state": {
+            "type": "string",
+            "enum": [s.name for s in FlowState],
+        },
+        "user_intent": {
+            "type": "string",
+            "enum": [s.name for s in UserIntent],
+        },
+    },
+    "required": ["summary", "prediction", "conversation_state", "flow_state", "user_intent"],
+}
 
 
 async def generate_summary(store: ContextStore):
-    if not ollama_client: return
-
     layers = store.get_all_events_for_summary()
-    raw_context, full_prompt = build_summary_prompt(layers)
+    raw_context, full_prompt, total_events = build_summary_prompt(layers)
+
+    # Hard short-circuit: no events, no LLM call, no hallucination possible.
+    if total_events == 0:
+        store.set_summary(NO_ACTIVITY_SUMMARY, raw_context, [], [], "Unknown")
+        return
+
+    if gemini_summary_model is None:
+        # Gemini not initialized (no API key, init failed). Leave the previous
+        # summary in place rather than risk an Ollama hallucination here.
+        print("[Analyst] ⚠️  Gemini summary model unavailable — skipping summary cycle")
+        return
 
     try:
-        async with get_ollama_gate():
-            response = await asyncio.wait_for(
-                ollama_client.chat(
-                    model=OLLAMA_MODEL,
-                    messages=[{'role': 'user', 'content': full_prompt}],
-                    options={"temperature": 0.3}
-                ),
-                timeout=OLLAMA_TIMEOUT_SUMMARY,
-            )
-        full_response = response['message']['content'].strip()
-
-        summary_text = full_response
-        prediction_text = "None"
-
-        if "[SUMMARY]" in full_response:
-            parts = full_response.split("[SUMMARY]")
-            if len(parts) > 1:
-                remainder = parts[1]
-                if "[PREDICTION]" in remainder:
-                    split_pred = remainder.split("[PREDICTION]")
-                    summary_text = split_pred[0].strip()
-                    remainder = split_pred[1]
-
-                    if "[CLASSIFICATION]" in remainder:
-                        split_class = remainder.split("[CLASSIFICATION]")
-                        prediction_text = split_class[0].strip()
-                        class_block = split_class[1].strip()
-
-                        lines = class_block.split('\n')
-                        for line in lines:
-                            line = line.strip().upper()
-                            if line.startswith("STATE:"):
-                                try:
-                                    val = line.split(":")[1].strip()
-                                    store.set_conversation_state(ConversationState[val])
-                                except: pass
-                            elif line.startswith("FLOW:"):
-                                try:
-                                    val = line.split(":")[1].strip()
-                                    store.set_flow_state(FlowState[val])
-                                except: pass
-                            elif line.startswith("INTENT:"):
-                                try:
-                                    val = line.split(":")[1].strip()
-                                    store.set_user_intent(UserIntent[val])
-                                except: pass
-
-        store.set_summary(summary_text, raw_context, [], [], prediction_text)
-
+        response = await asyncio.wait_for(
+            gemini_summary_model.generate_content_async(
+                full_prompt,
+                generation_config={
+                    "temperature": 0.1,
+                    "response_mime_type": "application/json",
+                    "response_schema": _SUMMARY_RESPONSE_SCHEMA,
+                },
+            ),
+            timeout=OLLAMA_TIMEOUT_SUMMARY,
+        )
     except asyncio.TimeoutError:
         print(f"⏱️  [Analyst] generate_summary timed out after {OLLAMA_TIMEOUT_SUMMARY}s")
-        log_error("analyst.generate_summary", "ollama chat timeout",
-                  timeout_s=OLLAMA_TIMEOUT_SUMMARY)
+        log_error("analyst.generate_summary", "gemini timeout", timeout_s=OLLAMA_TIMEOUT_SUMMARY)
+        return
     except Exception as e:
         kind = type(e).__name__
         detail = str(e) or repr(e)
         print(f"[Analyst] Summary error ({kind}): {detail}")
-        log_error("analyst.generate_summary", "ollama chat error", exc=e)
+        log_error("analyst.generate_summary", "gemini error", exc=e)
+        return
+
+    try:
+        data = json.loads(response.text)
+    except (json.JSONDecodeError, AttributeError, ValueError) as e:
+        # Schema enforcement should make this rare, but guard anyway. Write
+        # the unavailable marker so the UI shows something honest instead of
+        # leaving a stale summary that looks current.
+        print(f"[Analyst] Summary JSON parse failed: {e}")
+        store.set_summary(UNAVAILABLE_SUMMARY, raw_context, [], [], "Unknown")
+        return
+
+    summary_text = (data.get("summary") or UNAVAILABLE_SUMMARY).strip()
+    prediction_text = (data.get("prediction") or "Unknown").strip()
+
+    conv_state = data.get("conversation_state")
+    if conv_state in ConversationState.__members__:
+        store.set_conversation_state(ConversationState[conv_state])
+
+    flow_state = data.get("flow_state")
+    if flow_state in FlowState.__members__:
+        store.set_flow_state(FlowState[flow_state])
+
+    user_intent = data.get("user_intent")
+    if user_intent in UserIntent.__members__:
+        store.set_user_intent(UserIntent[user_intent])
+
+    store.set_summary(summary_text, raw_context, [], [], prediction_text)
