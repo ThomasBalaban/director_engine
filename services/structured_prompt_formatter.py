@@ -49,25 +49,34 @@ class StructuredPromptFormatter:
         manual_context: str = "",
         current_streamer: str = "",
         suppress_proactive: bool = False,
+        conversation_only: bool = False,
     ) -> str:
         """
         Build the complete structured prompt.
-        
+
         Returns a clean, hierarchical prompt with clear sections.
+
+        conversation_only: reply_only mode. Drops visual/scene/game-state
+        blocks entirely so the reply doesn't depend on vision/audio/sensory
+        services. Direct-address replies use conversation log + memories
+        + user profile only.
         """
         sections = []
-        
+
         # === OPERATOR NOTES (Always first if present) ===
         operator_block = self._format_operator_notes(current_streamer, manual_context)
         if operator_block:
             sections.append(operator_block)
-        
+
         # === CHOOSE SECTION ORDER BASED ON FOCUS ===
-        if user_is_speaking:
-            # User talking = conversation priority
+        # In reply_only, every dispatched reply is a direct address — force
+        # conversation-focused layout regardless of mic-event presence (a
+        # twitch @mention is a direct address with no DIRECT_MICROPHONE event).
+        if user_is_speaking or conversation_only:
             sections.extend(self._build_conversation_focused_prompt(
                 directive, store, visual_summary, conversation_log, memories,
                 suppress_proactive=suppress_proactive,
+                conversation_only=conversation_only,
             ))
         else:
             # Silence/gameplay = commentary priority
@@ -75,13 +84,14 @@ class StructuredPromptFormatter:
                 directive, store, visual_summary, conversation_log, memories,
                 suppress_proactive=suppress_proactive,
             ))
-        
+
         # Join all sections
         return "\n\n".join(sections)
-    
+
     def _build_conversation_focused_prompt(
         self, directive, store, visual_summary, conversation_log, memories,
         suppress_proactive: bool = False,
+        conversation_only: bool = False,
     ) -> List[str]:
         """User is actively talking - prioritize interaction."""
         sections = []
@@ -98,23 +108,26 @@ class StructuredPromptFormatter:
         # 2. USER CONTEXT (Who we're talking to)
         if store.active_user_profile:
             sections.append(self._format_user_context(store.active_user_profile))
-        
+
         # 3. CONVERSATION LOG (Main focus - what was said)
         sections.append(f"""<focus type="CONVERSATION" priority="HIGH">
 {conversation_log}
 </focus>""")
-        
-        # 4. SCENE BACKGROUND (Secondary - what's happening visually)
-        sections.append(f"""<background type="GAME_STATE" priority="LOW">
+
+        # 4. SCENE BACKGROUND (Secondary — what's happening visually).
+        # Skipped in reply_only: vision/audio/sensory services may not be
+        # running, and a direct-address reply shouldn't depend on them.
+        if not conversation_only:
+            sections.append(f"""<background type="GAME_STATE" priority="LOW">
 {self._format_scene_metadata(store)}
 
 {visual_summary}
 </background>""")
-        
+
         # 5. MEMORIES (Callback opportunities)
         if memories:
             sections.append(self._format_memories(memories, store))
-        
+
         return sections
     
     def _build_gameplay_focused_prompt(

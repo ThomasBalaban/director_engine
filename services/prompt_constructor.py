@@ -56,8 +56,13 @@ class PromptConstructor:
         # reply_plus_urgent, drop proactive "fill the silence" guidance and
         # past internal thoughts so a direct-address reply isn't colored by
         # commentary that never reached chat anyway.
+        #
+        # reply_only goes further — it also strips vision/ambient-audio events
+        # and skips the visual-summary LLM call, so the reply doesn't depend
+        # on vision_service / stream_audio_service / sensory_data being up.
         reply_mode = await prompt_client.get_reply_mode()
         suppress_proactive = reply_mode != "off"
+        conversation_only = reply_mode == "reply_only"
 
         # [NEW] Determine detail level
         detail_mode = self.detail_controller.select_detail_mode(store)
@@ -65,20 +70,24 @@ class PromptConstructor:
 
         # Get raw event layers
         layers = store.get_all_events_for_summary()
-        
+
         # --- FIX: Include recent background visuals/audio so peripheral data
         # doesn't vanish when it ages past the 30s recent window. ---
         # Only pull high-interest visual/audio events from background to avoid
-        # flooding the prompt with stale chat/system noise.
-        background_periphery = [
-            e for e in layers['background'][-20:]   # look at last 20 background events
-            if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
-            and e.score.interestingness > 0.6
-        ]
+        # flooding the prompt with stale chat/system noise. Skipped entirely
+        # in reply_only since vision/audio are excluded from the prompt.
+        if conversation_only:
+            background_periphery = []
+        else:
+            background_periphery = [
+                e for e in layers['background'][-20:]   # look at last 20 background events
+                if e.source in [InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO]
+                and e.score.interestingness > 0.6
+            ]
 
         # Filter for relevant events from immediate + recent
         active_events = layers['immediate'] + [
-            e for e in layers['recent'] 
+            e for e in layers['recent']
             if e.score.interestingness > 0.4 or e.source in [InputSource.TWITCH_MENTION, InputSource.DIRECT_MICROPHONE]
         ]
 
@@ -96,26 +105,40 @@ class PromptConstructor:
                 if e.source != InputSource.INTERNAL_THOUGHT
             ]
 
+        # In reply_only, drop everything that comes from the optional
+        # vision / stream-audio pipelines so the reply is purely
+        # conversational and survives those services being offline.
+        if conversation_only:
+            active_events = [
+                e for e in active_events
+                if e.source not in (InputSource.VISUAL_CHANGE, InputSource.AMBIENT_AUDIO)
+            ]
+
         # Sort chronologically
         active_events.sort(key=lambda x: x.timestamp)
-        
+
         # [NEW] Apply detail limits to visuals
         visual_events = [e for e in active_events if e.source == InputSource.VISUAL_CHANGE]
         visual_events = self.detail_controller.apply_limits_to_visual(visual_events, detail_mode)
-        
+
         # [NEW] Apply limits to memories
         memories = self.detail_controller.apply_limits_to_memories(memories, detail_mode)
-        
+
         # Check if user is speaking
         user_is_speaking = any(e.source == InputSource.DIRECT_MICROPHONE for e in active_events)
-        
-        # Build formatted sections (using ASYNC visual summary)
-        visual_str = await self._format_visual_summary(visual_events)
+
+        # Build formatted sections. In reply_only the visual block is dropped
+        # by the formatter, so skip the Gemini summarization call entirely —
+        # no API spend, no 10s timeout risk, no dependency on vision_service.
+        if conversation_only:
+            visual_str = ""
+        else:
+            visual_str = await self._format_visual_summary(visual_events)
         log_str = self._format_event_log(active_events)
-        
+
         # [NEW] Get thread context
         thread_context = store.thread_manager.get_thread_context_for_prompt()
-        
+
         # [NEW] Use structured formatter
         prompt = self.formatter.format_full_prompt(
             directive=directive,
@@ -128,6 +151,7 @@ class PromptConstructor:
             manual_context=shared.get_manual_context(),
             current_streamer=shared.get_current_streamer(),
             suppress_proactive=suppress_proactive,
+            conversation_only=conversation_only,
         )
         
         # [NEW] Inject thread context if present
