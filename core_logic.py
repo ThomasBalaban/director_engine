@@ -123,6 +123,9 @@ async def process_engine_event(
     if username:
         profile = shared.profile_manager.get_profile(username)
         shared.store.set_active_user(profile)
+    elif source in (config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE):
+        profile = shared.profile_manager.get_profile(shared.get_current_streamer())
+        shared.store.set_active_user(profile)
 
     # 3. Track conversation threads
     if source in [config.InputSource.MICROPHONE, config.InputSource.DIRECT_MICROPHONE]:
